@@ -230,9 +230,13 @@ function getPrimeImplicants(indices, numVars) {
   return Array.from(allPIsMap.values());
 }
 
-/* Essential PIs first, then a greedy cover for whatever minterms remain.
-   (Greedy, not full Petrick's method — gives a minimal-in-practice, always
-   correct cover, which is what matters for a verified circuit.) */
+/* Essential PIs first, then Petrick's method (exact minimum cover) for
+   whatever minterms remain — this is what guarantees the expression that
+   comes out is truly minimal, not just "good enough". Petrick's method
+   expands a product-of-sums of candidate PIs into a sum-of-products and
+   keeps the smallest term (fewest PIs, then fewest literals). Because that
+   expansion can blow up on pathological inputs, a capped, pruned search is
+   used, falling back to a greedy cover only if the cap is hit. */
 function selectEssentialPIs(minterms, dontCares, allPIs) {
   const targets = minterms.filter(m => !dontCares.includes(m));
   if (targets.length === 0) return [];
@@ -252,20 +256,83 @@ function selectEssentialPIs(minterms, dontCares, allPIs) {
   const covered = new Set();
   selected.forEach(idx => allPIs[idx].covers.forEach(c => { if (targets.includes(c)) covered.add(c); }));
 
-  let remaining = targets.filter(m => !covered.has(m));
-  while (remaining.length > 0) {
-    let bestIdx = -1, bestCount = -1;
-    allPIs.forEach((pi, idx) => {
-      if (selected.has(idx)) return;
-      const count = remaining.filter(m => pi.covers.has(m)).length;
-      if (count > bestCount) { bestCount = count; bestIdx = idx; }
-    });
-    if (bestIdx === -1 || bestCount <= 0) break;
-    selected.add(bestIdx);
-    remaining = remaining.filter(m => !allPIs[bestIdx].covers.has(m));
+  const remaining = targets.filter(m => !covered.has(m));
+  if (remaining.length > 0) {
+    const candidateIdx = allPIs
+      .map((_, idx) => idx)
+      .filter(idx => !selected.has(idx) && remaining.some(m => allPIs[idx].covers.has(m)));
+    petricksMethod(remaining, candidateIdx, allPIs).forEach(idx => selected.add(idx));
   }
 
   return Array.from(selected).map(idx => allPIs[idx]);
+}
+
+function literalCountOf(pi) {
+  return [...pi.bin].filter(ch => ch !== '-').length;
+}
+
+function isSubset(a, b) {
+  for (const x of a) if (!b.has(x)) return false;
+  return true;
+}
+
+/* Drop any candidate set that is a strict superset of another candidate —
+   a superset can never be part of a minimum cover, so pruning them keeps
+   the product-of-sums expansion from exploding. */
+function pruneSupersets(sets) {
+  const seen = new Map();
+  sets.forEach(s => seen.set([...s].sort((a, b) => a - b).join(','), s));
+  const unique = Array.from(seen.values());
+  return unique.filter(s => !unique.some(other => other !== s && other.size < s.size && isSubset(other, s)));
+}
+
+function greedyCover(remaining, candidateIdx, allPIs) {
+  const selected = [];
+  let left = remaining.slice();
+  while (left.length > 0) {
+    let bestIdx = -1, bestCount = -1;
+    candidateIdx.forEach(idx => {
+      if (selected.includes(idx)) return;
+      const count = left.filter(m => allPIs[idx].covers.has(m)).length;
+      if (count > bestCount) { bestCount = count; bestIdx = idx; }
+    });
+    if (bestIdx === -1 || bestCount <= 0) break;
+    selected.push(bestIdx);
+    left = left.filter(m => !allPIs[bestIdx].covers.has(m));
+  }
+  return selected;
+}
+
+function petricksMethod(remaining, candidateIdx, allPIs) {
+  const PETRICK_LIMIT = 4000; // safety cap on the product-of-sums expansion
+
+  // One clause (list of candidate PI indices) per remaining minterm.
+  const clauses = remaining.map(m => candidateIdx.filter(idx => allPIs[idx].covers.has(m)));
+  if (clauses.some(c => c.length === 0)) return greedyCover(remaining, candidateIdx, allPIs);
+
+  let products = [new Set()];
+  for (const clause of clauses) {
+    const next = [];
+    for (const p of products) {
+      for (const idx of clause) {
+        if (p.has(idx)) { next.push(p); continue; } // already covers this minterm
+        const merged = new Set(p);
+        merged.add(idx);
+        next.push(merged);
+      }
+    }
+    products = pruneSupersets(next);
+    if (products.length > PETRICK_LIMIT) return greedyCover(remaining, candidateIdx, allPIs);
+  }
+
+  let best = null;
+  products.forEach(p => {
+    const literalCount = [...p].reduce((s, idx) => s + literalCountOf(allPIs[idx]), 0);
+    if (!best || p.size < best.size || (p.size === best.size && literalCount < best.literalCount)) {
+      best = { size: p.size, literalCount, set: p };
+    }
+  });
+  return best ? Array.from(best.set) : greedyCover(remaining, candidateIdx, allPIs);
 }
 
 function piTermsToExpression(binList, varNames) {
@@ -283,145 +350,299 @@ function piTermsToExpression(binList, varNames) {
 }
 
 /* -------------------------------------------------------------------------
-   5. Gate trees: SOP tree, then NAND-only / NOR-only via De Morgan
+   5. Gate networks: a shared DAG builder (not a tree) so that repeated
+   literals — the same variable inverted for use in several product terms —
+   are built ONCE and fanned out to every gate that needs them. This is the
+   single biggest lever for a genuinely minimal gate count: the previous
+   tree-based approach rebuilt a fresh inverter (or worse, a whole cloned
+   subtree) for every occurrence.
+
+   Each plan (basic AND/OR/NOT, NAND-only, NOR-only) is built against the
+   textbook-minimal two-level identities:
+     NAND-NAND : F = NAND(NAND(term1 literals), NAND(term2 literals), ...)
+                  (works directly — no extra inverters at the OR level;
+                  a term with a single literal must itself be inverted so
+                  every operand feeding the top gate is NOT(product))
+     NOR-NOR   : AND(l1,l2,...) = NOR(¬l1,¬l2,...)      (no extra inverter)
+                 OR(term1,...)  = NOT(NOR(term1,...))    (one final inverter,
+                  skipped when there is only a single term)
+   A 2-variable XOR/XNOR pattern (the two PI terms use the same two
+   variables with opposite polarities) is special-cased to the well-known
+   4-gate NAND/NOR XOR construction, which beats the generic expansion.
    ------------------------------------------------------------------------- */
 
-function buildTreeFromPIs(piTerms, varNames) {
-  if (piTerms.length === 0) return { type: 'CONST0', inputs: [] };
-  const termNodes = piTerms.map(bin => {
-    const literals = [];
-    for (let i = 0; i < bin.length; i++) {
-      if (bin[i] === '1') literals.push({ type: 'VAR', name: varNames[i], inputs: [] });
-      else if (bin[i] === '0') literals.push({ type: 'NOT', inputs: [{ type: 'VAR', name: varNames[i], inputs: [] }] });
-    }
-    if (literals.length === 0) return { type: 'CONST1', inputs: [] };
-    return literals.reduce((acc, lit) => acc ? { type: 'AND', inputs: [acc, lit] } : lit, null);
+class CircuitBuilder {
+  constructor() {
+    this.nodes = new Map();
+    this._next = 0;
+    this._varCache = new Map();
+    this._invCache = new Map();
+  }
+  _id() { return 'n' + (this._next++); }
+  addVar(name) {
+    if (this._varCache.has(name)) return this._varCache.get(name);
+    const id = this._id();
+    this.nodes.set(id, { id, type: 'VAR', name, inputs: [] });
+    this._varCache.set(name, id);
+    return id;
+  }
+  addConst(bit) {
+    const id = this._id();
+    this.nodes.set(id, { id, type: bit ? 'CONST1' : 'CONST0', inputs: [] });
+    return id;
+  }
+  addGate(type, inputIds) {
+    const id = this._id();
+    this.nodes.set(id, { id, type, inputs: inputIds.slice() });
+    return id;
+  }
+  /* A single-input inverter, realized either as a real NOT gate or as a
+     self-tied universal gate (NAND/NOR). Cached per (gateType, child) pair
+     so the same variable is only ever inverted once and then fanned out. */
+  addInverter(gateType, childId) {
+    const key = gateType + ':' + childId;
+    if (this._invCache.has(key)) return this._invCache.get(key);
+    const id = gateType === 'NOT' ? this.addGate('NOT', [childId]) : this.addGate(gateType, [childId, childId]);
+    this._invCache.set(key, id);
+    return id;
+  }
+}
+
+/* literalWire  -> the literal's own signal (var, or NOT var if negated) */
+function literalWire(builder, invType, varIdx, neg, varNames) {
+  const varId = builder.addVar(varNames[varIdx]);
+  return neg ? builder.addInverter(invType, varId) : varId;
+}
+/* complementOfLiteral -> the complement of the literal's signal (NOT var if
+   positive, or the bare var if the literal was already negated — no
+   double negation) */
+function complementOfLiteral(builder, invType, varIdx, neg, varNames) {
+  const varId = builder.addVar(varNames[varIdx]);
+  return neg ? varId : builder.addInverter(invType, varId);
+}
+
+function usedIndices(bin) {
+  const idxs = [];
+  for (let i = 0; i < bin.length; i++) if (bin[i] !== '-') idxs.push(i);
+  return idxs;
+}
+
+/* Detects piTerms === exactly two product terms over exactly the same two
+   variables with opposite polarities, i.e. an XOR or XNOR in disguise. */
+function detectXorPattern(piTerms, varNames) {
+  if (piTerms.length !== 2) return null;
+  const idxs0 = usedIndices(piTerms[0]);
+  const idxs1 = usedIndices(piTerms[1]);
+  if (idxs0.length !== 2 || idxs1.length !== 2) return null;
+  if (idxs0[0] !== idxs1[0] || idxs0[1] !== idxs1[1]) return null;
+
+  const [i, j] = idxs0;
+  const bin0 = piTerms[0], bin1 = piTerms[1];
+  if (bin0[i] === bin1[i] || bin0[j] === bin1[j]) return null; // must differ on both bits
+
+  return { a: varNames[i], b: varNames[j], xnor: bin0[i] === bin0[j] };
+}
+
+function isConst0(piTerms) { return piTerms.length === 0; }
+function isConst1(piTerms) { return piTerms.some(b => [...b].every(ch => ch === '-')); }
+
+function buildBasicPlan(builder, piTerms, varNames) {
+  if (isConst0(piTerms)) return builder.addConst(0);
+  if (isConst1(piTerms)) return builder.addConst(1);
+
+  const xorInfo = detectXorPattern(piTerms, varNames);
+  if (xorInfo) {
+    const aId = builder.addVar(xorInfo.a), bId = builder.addVar(xorInfo.b);
+    return builder.addGate(xorInfo.xnor ? 'XNOR' : 'XOR', [aId, bId]);
+  }
+
+  const termIds = piTerms.map(bin => {
+    const idxs = usedIndices(bin);
+    if (idxs.length === 0) return builder.addConst(1);
+    const literalIds = idxs.map(i => literalWire(builder, 'NOT', i, bin[i] === '0', varNames));
+    return literalIds.length === 1 ? literalIds[0] : builder.addGate('AND', literalIds);
   });
-  return termNodes.reduce((acc, t) => acc ? { type: 'OR', inputs: [acc, t] } : t, null);
+
+  return termIds.length === 1 ? termIds[0] : builder.addGate('OR', termIds);
 }
 
-function cloneLeaf(node) {
-  if (node.type === 'VAR') return { type: 'VAR', name: node.name, inputs: [] };
-  return { type: node.type, inputs: [] };
+function buildNANDPlan(builder, piTerms, varNames) {
+  if (isConst0(piTerms)) return builder.addConst(0);
+  if (isConst1(piTerms)) return builder.addConst(1);
+
+  const xorInfo = detectXorPattern(piTerms, varNames);
+  if (xorInfo) {
+    const aId = builder.addVar(xorInfo.a), bId = builder.addVar(xorInfo.b);
+    const n1 = builder.addGate('NAND', [aId, bId]);
+    const n2 = builder.addGate('NAND', [aId, n1]);
+    const n3 = builder.addGate('NAND', [bId, n1]);
+    const out = builder.addGate('NAND', [n2, n3]); // = XOR(a,b), 4 gates
+    return xorInfo.xnor ? builder.addInverter('NAND', out) : out; // XNOR = 5 gates
+  }
+
+  const terms = piTerms.map(bin => usedIndices(bin).map(i => ({ i, neg: bin[i] === '0' })));
+
+  if (terms.length === 1) {
+    const lits = terms[0];
+    if (lits.length === 0) return builder.addConst(1);
+    if (lits.length === 1) return literalWire(builder, 'NAND', lits[0].i, lits[0].neg, varNames);
+    const literalIds = lits.map(l => literalWire(builder, 'NAND', l.i, l.neg, varNames));
+    return builder.addInverter('NAND', builder.addGate('NAND', literalIds));
+  }
+
+  // >= 2 terms: every term must contribute NOT(product) to the top NAND.
+  const termNotIds = terms.map(lits => {
+    if (lits.length === 1) return complementOfLiteral(builder, 'NAND', lits[0].i, lits[0].neg, varNames);
+    const literalIds = lits.map(l => literalWire(builder, 'NAND', l.i, l.neg, varNames));
+    return builder.addGate('NAND', literalIds); // already NOT(product)
+  });
+  return builder.addGate('NAND', termNotIds);
 }
 
-// Helper to prevent O(2^N) exponential tree generation when tying inputs together
-function deepCloneNode(node) {
-  if (!node) return null;
-  return { ...node, inputs: node.inputs.map(deepCloneNode) };
+function buildNORPlan(builder, piTerms, varNames) {
+  if (isConst0(piTerms)) return builder.addConst(0);
+  if (isConst1(piTerms)) return builder.addConst(1);
+
+  const xorInfo = detectXorPattern(piTerms, varNames);
+  if (xorInfo) {
+    const aId = builder.addVar(xorInfo.a), bId = builder.addVar(xorInfo.b);
+    const n1 = builder.addGate('NOR', [aId, bId]);
+    const n2 = builder.addGate('NOR', [aId, n1]);
+    const n3 = builder.addGate('NOR', [bId, n1]);
+    const out = builder.addGate('NOR', [n2, n3]); // = XNOR(a,b), 4 gates
+    return xorInfo.xnor ? out : builder.addInverter('NOR', out); // XOR = 5 gates
+  }
+
+  const terms = piTerms.map(bin => usedIndices(bin).map(i => ({ i, neg: bin[i] === '0' })));
+
+  const termVals = terms.map(lits => {
+    if (lits.length === 0) return { id: builder.addConst(1), single: true };
+    if (lits.length === 1) return { id: literalWire(builder, 'NOR', lits[0].i, lits[0].neg, varNames), single: true };
+    const compIds = lits.map(l => complementOfLiteral(builder, 'NOR', l.i, l.neg, varNames));
+    return { id: builder.addGate('NOR', compIds), single: false }; // = AND(literals) directly
+  });
+
+  if (termVals.length === 1) return termVals[0].id;
+
+  const norAll = builder.addGate('NOR', termVals.map(t => t.id));
+  return builder.addInverter('NOR', norAll); // OR(...) = NOT(NOR(...))
 }
 
-function toNANDTree(node) {
-  if (node.inputs.length === 0) return cloneLeaf(node);
-
-  // Evaluate children ONCE per layer
-  const left = node.inputs[0] ? toNANDTree(node.inputs[0]) : null;
-  const right = node.inputs[1] ? toNANDTree(node.inputs[1]) : null;
-
-  if (node.type === 'NOT') {
-    return { type: 'NAND', inputs: [left, deepCloneNode(left)] };
+function evalDAGNode(builder, id, assign, memo) {
+  if (memo.has(id)) return memo.get(id);
+  const node = builder.nodes.get(id);
+  const inVal = i => evalDAGNode(builder, node.inputs[i], assign, memo);
+  let val;
+  switch (node.type) {
+    case 'VAR': val = assign[node.name]; break;
+    case 'CONST0': val = 0; break;
+    case 'CONST1': val = 1; break;
+    case 'NOT': val = inVal(0) ? 0 : 1; break;
+    case 'AND': val = node.inputs.every((_, i) => inVal(i)) ? 1 : 0; break;
+    case 'OR': val = node.inputs.some((_, i) => inVal(i)) ? 1 : 0; break;
+    case 'NAND': val = node.inputs.every((_, i) => inVal(i)) ? 0 : 1; break;
+    case 'NOR': val = node.inputs.some((_, i) => inVal(i)) ? 0 : 1; break;
+    case 'XOR': val = (inVal(0) !== inVal(1)) ? 1 : 0; break;
+    case 'XNOR': val = (inVal(0) === inVal(1)) ? 1 : 0; break;
+    default: throw new Error('Unknown node type: ' + node.type);
   }
-  if (node.type === 'AND') {
-    const inner = { type: 'NAND', inputs: [left, right] };
-    return { type: 'NAND', inputs: [inner, deepCloneNode(inner)] };
-  }
-  if (node.type === 'OR') {
-    const notLeft = { type: 'NAND', inputs: [left, deepCloneNode(left)] };
-    const notRight = { type: 'NAND', inputs: [right, deepCloneNode(right)] };
-    return { type: 'NAND', inputs: [notLeft, notRight] };
-  }
-  throw new Error('Unsupported node in NAND conversion: ' + node.type);
-}
-
-function toNORTree(node) {
-  if (node.inputs.length === 0) return cloneLeaf(node);
-
-  const left = node.inputs[0] ? toNORTree(node.inputs[0]) : null;
-  const right = node.inputs[1] ? toNORTree(node.inputs[1]) : null;
-
-  if (node.type === 'NOT') {
-    return { type: 'NOR', inputs: [left, deepCloneNode(left)] };
-  }
-  if (node.type === 'OR') {
-    const inner = { type: 'NOR', inputs: [left, right] };
-    return { type: 'NOR', inputs: [inner, deepCloneNode(inner)] };
-  }
-  if (node.type === 'AND') {
-    const notLeft = { type: 'NOR', inputs: [left, deepCloneNode(left)] };
-    const notRight = { type: 'NOR', inputs: [right, deepCloneNode(right)] };
-    return { type: 'NOR', inputs: [notLeft, notRight] };
-  }
-  throw new Error('Unsupported node in NOR conversion: ' + node.type);
+  memo.set(id, val);
+  return val;
 }
 
 /* -------------------------------------------------------------------------
-   6. Circuit diagram layout & SVG rendering
+   6. Circuit diagram layout & SVG rendering (DAG-aware: a node with several
+   consumers is drawn once and its output wire fans out to each of them)
    ------------------------------------------------------------------------- */
 
 const CIRCUIT_XSTEP = 160, CIRCUIT_YSTEP = 80, CIRCUIT_LEFT = 70, CIRCUIT_TOP = 40;
 
-function layoutTree(root) {
-  let leafIndex = 0;
-  const allNodes = [];
-  function visit(node) {
-    if (node.inputs.length === 0) {
-      node._level = 0;
-      node._y = leafIndex * CIRCUIT_YSTEP;
-      leafIndex++;
-    } else {
-      node.inputs.forEach(visit);
-      node._level = Math.max(...node.inputs.map(n => n._level)) + 1;
-      node._y = node.inputs.reduce((s, n) => s + n._y, 0) / node.inputs.length;
-    }
-    node._x = CIRCUIT_LEFT + node._level * CIRCUIT_XSTEP;
-    node._y_px = CIRCUIT_TOP + node._y;
-    allNodes.push(node);
+function layoutDAG(builder, rootId) {
+  const reachable = new Set();
+  (function dfs(id) {
+    if (reachable.has(id)) return;
+    reachable.add(id);
+    builder.nodes.get(id).inputs.forEach(dfs);
+  })(rootId);
+
+  const leaves = [...reachable].filter(id => builder.nodes.get(id).inputs.length === 0);
+  leaves.sort((a, b) => {
+    const na = builder.nodes.get(a), nb = builder.nodes.get(b);
+    const ra = na.type === 'VAR' ? VARNAMES.indexOf(na.name) : 99;
+    const rb = nb.type === 'VAR' ? VARNAMES.indexOf(nb.name) : 99;
+    return ra - rb;
+  });
+
+  const level = new Map(), y = new Map();
+  leaves.forEach((id, i) => { level.set(id, 0); y.set(id, i * CIRCUIT_YSTEP); });
+
+  function getLevel(id) {
+    if (level.has(id)) return level.get(id);
+    const node = builder.nodes.get(id);
+    const lvl = Math.max(...node.inputs.map(getLevel)) + 1;
+    level.set(id, lvl);
+    return lvl;
   }
-  visit(root);
-  return allNodes;
+  function getY(id) {
+    if (y.has(id)) return y.get(id);
+    const node = builder.nodes.get(id);
+    const uniqueInputs = [...new Set(node.inputs)];
+    const val = uniqueInputs.reduce((s, cid) => s + getY(cid), 0) / uniqueInputs.length;
+    y.set(id, val);
+    return val;
+  }
+  reachable.forEach(id => { getLevel(id); getY(id); });
+
+  return { reachable, level, y };
 }
 
-function shapeFor(type) {
-  const big = { w: 56, h: 44 };
-  const small = { w: 40, h: 30 };
+function shapeFor(type, inputCount) {
+  const bigW = 56, smallW = 40;
+  const h = type === 'NOT' ? 30 : Math.max(44, (inputCount - 1) * 22 + 30);
   switch (type) {
-    case 'AND': return { ...big, outTip: big.w * 0.55 + big.h / 2, bubble: false, bubbleR: 0 };
-    case 'NAND': return { ...big, outTip: big.w * 0.55 + big.h / 2, bubble: true, bubbleR: 5 };
-    case 'OR': return { ...big, outTip: big.w * 0.62, bubble: false, bubbleR: 0 };
-    case 'NOR': return { ...big, outTip: big.w * 0.62, bubble: true, bubbleR: 5 };
-    case 'NOT': return { ...small, outTip: small.w * 0.75, bubble: true, bubbleR: 5 };
+    case 'AND': return { w: bigW, h, outTip: bigW * 0.55 + h / 2, bubble: false, bubbleR: 0 };
+    case 'NAND': return { w: bigW, h, outTip: bigW * 0.55 + h / 2, bubble: true, bubbleR: 5 };
+    case 'OR': return { w: bigW, h, outTip: bigW * 0.62, bubble: false, bubbleR: 0 };
+    case 'NOR': return { w: bigW, h, outTip: bigW * 0.62, bubble: true, bubbleR: 5 };
+    case 'XOR': return { w: bigW, h, outTip: bigW * 0.62, bubble: false, bubbleR: 0 };
+    case 'XNOR': return { w: bigW, h, outTip: bigW * 0.62, bubble: true, bubbleR: 5 };
+    case 'NOT': return { w: smallW, h, outTip: smallW * 0.75, bubble: true, bubbleR: 5 };
     default: throw new Error('Unknown gate type: ' + type);
   }
 }
 
-function drawGate(gx, gy, type) {
-  const dims = shapeFor(type);
+function drawGate(gx, gy, type, dims) {
   const halfH = dims.h / 2;
-  let path = '';
+  let path = '', extra = '';
   if (type === 'AND' || type === 'NAND') {
     const straightW = dims.w * 0.55;
     path = `M${gx},${gy - halfH} H${gx + straightW} A${halfH},${halfH} 0 0 1 ${gx + straightW},${gy + halfH} H${gx} Z`;
-  } else if (type === 'OR' || type === 'NOR') {
+  } else if (type === 'OR' || type === 'NOR' || type === 'XOR' || type === 'XNOR') {
     path = `M${gx},${gy - halfH} Q${gx + dims.w * 0.4},${gy - halfH} ${gx + dims.w * 0.62},${gy} ` +
       `Q${gx + dims.w * 0.4},${gy + halfH} ${gx},${gy + halfH} Q${gx + dims.w * 0.18},${gy} ${gx},${gy - halfH} Z`;
+    if (type === 'XOR' || type === 'XNOR') {
+      extra = `<path d="M${gx - 6},${gy - halfH} Q${gx + dims.w * 0.18 - 6},${gy} ${gx - 6},${gy + halfH}" class="gwire"/>`;
+    }
   } else if (type === 'NOT') {
     path = `M${gx},${gy - halfH} L${gx + dims.w * 0.75},${gy} L${gx},${gy + halfH} Z`;
   }
-  let svg = `<path d="${path}" class="gshape"/>`;
+  let svg = `<path d="${path}" class="gshape"/>` + extra;
   if (dims.bubble) {
     svg += `<circle cx="${gx + dims.outTip + dims.bubbleR}" cy="${gy}" r="${dims.bubbleR}" class="gbubble"/>`;
   }
   return svg;
 }
 
-function buildCircuitSVG(root) {
-  const nodes = layoutTree(root);
+function buildCircuitSVGFromDAG(builder, rootId) {
+  const { reachable, level, y } = layoutDAG(builder, rootId);
+  const nodes = [...reachable].map(id => builder.nodes.get(id));
   const leafNodes = nodes.filter(n => n.inputs.length === 0);
-  const gateNodes = nodes.filter(n => n.inputs.length > 0);
+  const gateNodes = nodes.filter(n => n.inputs.length > 0).sort((a, b) => level.get(a.id) - level.get(b.id));
 
-  const maxLevel = Math.max(...nodes.map(n => n._level));
+  const maxLevel = Math.max(...nodes.map(n => level.get(n.id)));
+  const maxY = Math.max(...nodes.map(n => y.get(n.id)));
   const width = CIRCUIT_LEFT + maxLevel * CIRCUIT_XSTEP + 170;
-  const height = CIRCUIT_TOP * 2 + Math.max(leafNodes.length - 1, 0) * CIRCUIT_YSTEP + 20;
+  const height = CIRCUIT_TOP * 2 + maxY + 20;
 
   let svg = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" class="circuit-svg" role="img" aria-label="Logic circuit diagram">`;
   svg += `<style>
@@ -432,30 +653,37 @@ function buildCircuitSVG(root) {
     .goutlabel{font-family:var(--font-mono);font-size:13px;fill:var(--accent);font-weight:600;}
   </style>`;
 
+  const posX = id => CIRCUIT_LEFT + level.get(id) * CIRCUIT_XSTEP;
+  const posY = id => CIRCUIT_TOP + y.get(id);
+  const outX = new Map();
+
   leafNodes.forEach(n => {
     const label = n.type === 'VAR' ? n.name : (n.type === 'CONST0' ? '0' : '1');
-    svg += `<text x="${n._x - 10}" y="${n._y_px + 5}" text-anchor="end" class="glabel">${label}</text>`;
-    svg += `<line x1="${n._x}" y1="${n._y_px}" x2="${n._x + 20}" y2="${n._y_px}" class="gwire"/>`;
-    n._outX = n._x + 20;
+    const lx = posX(n.id), ly = posY(n.id);
+    svg += `<text x="${lx - 10}" y="${ly + 5}" text-anchor="end" class="glabel">${label}</text>`;
+    svg += `<line x1="${lx}" y1="${ly}" x2="${lx + 20}" y2="${ly}" class="gwire"/>`;
+    outX.set(n.id, lx + 20);
   });
 
   gateNodes.forEach(n => {
-    const dims = shapeFor(n.type);
-    const gx = n._x, gy = n._y_px;
-    svg += drawGate(gx, gy, n.type);
-    n._outX = gx + dims.outTip + (dims.bubble ? dims.bubbleR * 2 : 0);
+    const dims = shapeFor(n.type, n.inputs.length);
+    const gx = posX(n.id), gy = posY(n.id);
+    svg += drawGate(gx, gy, n.type, dims);
+    outX.set(n.id, gx + dims.outTip + (dims.bubble ? dims.bubbleR * 2 : 0));
 
-    const inputYs = n.inputs.length === 2 ? [gy - 10, gy + 10] : [gy];
-    n.inputs.forEach((child, idx) => {
+    const count = n.inputs.length;
+    const inputYs = count === 1 ? [gy] : n.inputs.map((_, idx) => gy - ((count - 1) * 10) + idx * 20);
+    n.inputs.forEach((cid, idx) => {
       const py = inputYs[idx];
-      const startX = child._outX, startY = child._y_px;
+      const startX = outX.get(cid), startY = posY(cid);
       const midX = (startX + gx) / 2;
       svg += `<path d="M${startX},${startY} H${midX} V${py} H${gx}" class="gwire"/>`;
     });
   });
 
-  svg += `<line x1="${root._outX}" y1="${root._y_px}" x2="${root._outX + 30}" y2="${root._y_px}" class="gwire"/>`;
-  svg += `<text x="${root._outX + 38}" y="${root._y_px + 5}" class="goutlabel">F</text>`;
+  const rootX = outX.get(rootId), rootY = posY(rootId);
+  svg += `<line x1="${rootX}" y1="${rootY}" x2="${rootX + 30}" y2="${rootY}" class="gwire"/>`;
+  svg += `<text x="${rootX + 38}" y="${rootY + 5}" class="goutlabel">F</text>`;
   svg += `</svg>`;
   return svg;
 }
@@ -582,9 +810,9 @@ function renderTruthTable(vector, varNames, numVars) {
   document.querySelector('#result-truth-table .result-body').innerHTML = html;
 }
 
-function renderCircuitInto(cardId, tree) {
+function renderCircuitInto(cardId, builder, rootId) {
   const container = document.querySelector(`#${cardId} .diagram-body`);
-  container.innerHTML = buildCircuitSVG(tree);
+  container.innerHTML = buildCircuitSVGFromDAG(builder, rootId);
 }
 
 function renderVerification(status, inputType) {
@@ -641,25 +869,30 @@ function generate() {
 
     const allPIs = getPrimeImplicants([...uniqueMinterms, ...uniqueDontCares], numVars);
     const essential = selectEssentialPIs(uniqueMinterms, uniqueDontCares, allPIs);
-    const simplifiedExprStr = piTermsToExpression(essential.map(p => p.bin), varNames);
-    const simplifiedTree = buildTreeFromPIs(essential.map(p => p.bin), varNames);
-    const nandTree = toNANDTree(simplifiedTree);
-    const norTree = toNORTree(simplifiedTree);
+    const piTerms = essential.map(p => p.bin);
+    const simplifiedExprStr = piTermsToExpression(piTerms, varNames);
+
+    const basicBuilder = new CircuitBuilder();
+    const basicRoot = buildBasicPlan(basicBuilder, piTerms, varNames);
+    const nandBuilder = new CircuitBuilder();
+    const nandRoot = buildNANDPlan(nandBuilder, piTerms, varNames);
+    const norBuilder = new CircuitBuilder();
+    const norRoot = buildNORPlan(norBuilder, piTerms, varNames);
 
     renderSimplifiedExpression(simplifiedExprStr);
     renderTruthTable(truthVector, varNames, numVars);
-    renderCircuitInto('result-basic-gates', simplifiedTree);
-    renderCircuitInto('result-nand', nandTree);
-    renderCircuitInto('result-nor', norTree);
+    renderCircuitInto('result-basic-gates', basicBuilder, basicRoot);
+    renderCircuitInto('result-nand', nandBuilder, nandRoot);
+    renderCircuitInto('result-nor', norBuilder, norRoot);
 
     const rows = allAssignments(numVars, varNames);
     let simpMatch = true, nandMatch = true, norMatch = true, origSelfMatch = true;
     rows.forEach((assign, i) => {
       if (truthVector[i] === 'X') return;
       const target = truthVector[i];
-      if (evalNode(simplifiedTree, assign) !== target) simpMatch = false;
-      if (evalNode(nandTree, assign) !== target) nandMatch = false;
-      if (evalNode(norTree, assign) !== target) norMatch = false;
+      if (evalDAGNode(basicBuilder, basicRoot, assign, new Map()) !== target) simpMatch = false;
+      if (evalDAGNode(nandBuilder, nandRoot, assign, new Map()) !== target) nandMatch = false;
+      if (evalDAGNode(norBuilder, norRoot, assign, new Map()) !== target) norMatch = false;
       if (inputType === 'expression' && originalEvalFn(assign) !== target) origSelfMatch = false;
     });
 

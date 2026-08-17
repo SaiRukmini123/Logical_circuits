@@ -98,15 +98,6 @@
           <p class="field-hint">Switch anytime — your variable count carries over.</p>
         </div>
 
-        <!-- Action -->
-        <div class="control-field control-field--action">
-          <span class="field-label-ghost" aria-hidden="true">&nbsp;</span>
-          <button id="generate-btn" class="btn btn-primary" type="button">
-            Generate circuit
-          </button>
-          <p class="field-hint">Runs simplification, gate diagrams &amp; verification.</p>
-        </div>
-
       </div>
 
       <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
@@ -239,6 +230,14 @@
       <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
     </div>
 
+    <!-- Generate action — sits at the end of the input flow -->
+    <div class="generate-action">
+      <button id="generate-btn" class="btn btn-primary" type="button">
+        Generate circuit
+      </button>
+      <p class="field-hint">Runs simplification, gate diagrams &amp; verification.</p>
+    </div>
+
   </section>
 
   <!-- ============ RESULTS ============ -->
@@ -251,7 +250,7 @@
     <div class="results-grid">
 
       <!-- Simplified expression -->
-      <div class="chip-card" id="result-expression">
+      <div class="chip-card chip-card--wide" id="result-expression">
         <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
         <div class="chip-card-head">
           <h3>Simplified expression</h3>
@@ -263,7 +262,7 @@
       </div>
 
       <!-- Truth table output -->
-      <div class="chip-card" id="result-truth-table">
+      <div class="chip-card chip-card--wide" id="result-truth-table">
         <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
         <div class="chip-card-head">
           <h3>Truth table</h3>
@@ -275,7 +274,7 @@
       </div>
 
       <!-- Basic gate diagram -->
-      <div class="chip-card" id="result-basic-gates">
+      <div class="chip-card chip-card--wide" id="result-basic-gates">
         <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
         <div class="chip-card-head">
           <h3>Logic gate implementation</h3>
@@ -288,7 +287,7 @@
       </div>
 
       <!-- NAND-only circuit -->
-      <div class="chip-card" id="result-nand">
+      <div class="chip-card chip-card--wide" id="result-nand">
         <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
         <div class="chip-card-head">
           <h3>NAND-only circuit</h3>
@@ -301,7 +300,7 @@
       </div>
 
       <!-- NOR-only circuit -->
-      <div class="chip-card" id="result-nor">
+      <div class="chip-card chip-card--wide" id="result-nor">
         <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
         <div class="chip-card-head">
           <h3>NOR-only circuit</h3>
@@ -361,10 +360,21 @@
     <!-- GROUP INFO PLACEHOLDER — replace with your group's details -->
     <div class="footer-group">
       <h4>Project group</h4>
-      <p>Group name: <span class="fill-me">— add group name —</span></p>
-      <p>Members: <span class="fill-me">— add member names —</span></p>
-      <p>Course / Section: <span class="fill-me">— add course info —</span></p>
-      <p>Submitted: <span class="fill-me">— add date —</span></p>
+      <p>Group name: <span class="fill-me"> Group 9 </span></p>
+      <p>Members: </p>
+      <p>
+        <span class="fill-me">(CS25BTECH11045) Peddinti Sai Rukmini</span>
+        </br>
+        <span class="fill-me">(CS25BTECH11059) Sri Harshita Pagudala</span>
+        </br>
+        <span class="fill-me">(CS25BTECH11055) Shrestha Saanvi</span>
+        </br>
+        <span class="fill-me">(CS25BTECH11021) Gorantla Sharanya Krishna</span>
+        </br>
+        <span class="fill-me">(CS25BTECH11006) Avi Singh</span>
+      </p>
+      <p>Course: <span class="fill-me">(EE1202) Digital Circuits </span></p>
+      <p>Campus: <span class="fill-me">Indian Institute of Technology Hyderabad (IITH)</span></p>
     </div>
 
     <div class="footer-meta">

@@ -333,6 +333,19 @@ a{ color: var(--cyan); }
 
 .control-field--action{ display: flex; flex-direction: column; }
 
+/* ---------- Generate action (sits after the input panels) ---------- */
+.generate-action{
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin-top: 1.75rem;
+  padding-top: 1.25rem;
+  border-top: 1px dashed var(--border);
+}
+.generate-action .btn{ flex: none; }
+.generate-action .field-hint{ margin: 0; }
+
 .btn{
   font-family: var(--font-body);
   font-weight: 600;
@@ -424,10 +437,15 @@ a{ color: var(--cyan); }
 
 .results-grid{
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: 1fr;
   gap: 1.5rem;
+  align-items: start;
 }
 .results-grid .chip-card{ margin-top: 0; }
+
+/* Give the results section room to breathe above the footer, whatever
+   height the tallest diagram ends up being. */
+#results{ padding-bottom: 2.5rem; }
 
 .result-body{ font-size: .92rem; }
 
@@ -490,7 +508,7 @@ a{ color: var(--cyan); }
   margin: 0 auto;
   padding: 2.75rem 1.5rem 2rem;
   display: grid;
-  grid-template-columns: 1.2fr 1fr 1fr;
+  grid-template-columns: 1fr 1.5fr 1fr;
   gap: 2rem;
 }
 
