@@ -593,3 +593,64 @@ a{ color: var(--cyan); }
   min-width: 260px;
   display: block;
 }
+
+/* ==========================================================================
+   Additions for the Adder / Subtractor / Multiplier modules
+   ========================================================================== */
+
+.nav-list{ flex-wrap: wrap; }
+
+.nav-tab{
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: .88rem;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ink-muted);
+  padding: .4rem .85rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.nav-tab:hover{ color: var(--ink); border-color: var(--border); }
+.nav-tab.is-active{
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.view.is-hidden{ display: none; }
+
+.operand-field{ min-width: 0; }
+
+.chain-stage-title{
+  font-family: var(--font-display);
+  font-size: .95rem;
+  color: var(--ink);
+  margin: 1.25rem 0 .5rem;
+}
+.chain-stage-title:first-child{ margin-top: 0; }
+
+/* Circuit / chain diagrams need horizontal scroll room on narrow screens
+   without shrinking gates to unreadable sizes. */
+.diagram-body,
+#add-result-chain .result-body,
+#sub-result-chain .result-body,
+#mul-result-chain .result-body{
+  overflow-x: auto;
+}
+#add-result-chain .circuit-svg,
+#sub-result-chain .circuit-svg,
+#mul-result-chain .circuit-svg{
+  min-width: 420px;
+}
+
+.partials-table td{ border: none; text-align: left; padding: .3rem .6rem; }
+.pp-op-label{ color: var(--ink-muted); font-family: var(--font-mono); font-size: .82rem; white-space: nowrap; }
+.pp-bits{ font-size: 1rem; letter-spacing: .12em; white-space: pre; }
+.pp-rule{ border: none; border-top: 1px dashed var(--border); margin: .25rem 0; }
+
+@media (max-width: 780px){
+  .nav-list{ gap: .5rem; }
+  .nav-tab{ font-size: .8rem; padding: .35rem .65rem; }
+}

@@ -555,7 +555,62 @@ function evalDAGNode(builder, id, assign, memo) {
    consumers is drawn once and its output wire fans out to each of them)
    ------------------------------------------------------------------------- */
 
-const CIRCUIT_XSTEP = 160, CIRCUIT_YSTEP = 80, CIRCUIT_LEFT = 70, CIRCUIT_TOP = 40;
+const CIRCUIT_XSTEP = 160, CIRCUIT_YSTEP = 80, CIRCUIT_LEFT = 70, CIRCUIT_TOP = 40, CIRCUIT_GATE_GAP = 16;
+
+/* Vertical footprint of a node's own shape, used only for layout collision
+   checks (leaves are just a short stub wire + label). */
+function nodeHeight(builder, id) {
+  const node = builder.nodes.get(id);
+  return node.inputs.length === 0 ? 20 : shapeFor(node.type, node.inputs.length).h;
+}
+
+/* Assigns a level (x-column, by DAG depth) and a y (row position) to every
+   reachable node. y starts as the plain average of a node's input y's, which
+   keeps wires short and roughly centered — but that average alone is not
+   collision-free: two gates that share a nearby input (extremely common in
+   real SOP circuits, e.g. any two product terms sharing a variable) can land
+   at the same or overlapping y, and a gate's height can exceed the row
+   spacing once it has 3+ inputs. So after the raw average is computed for a
+   level, its nodes are swept top-to-bottom and pushed apart just enough
+   (using their actual drawn heights) that no two gate shapes overlap. */
+function assignLevelsAndY(builder, reachable, leaves) {
+  const level = new Map(), y = new Map();
+  leaves.forEach((id, i) => { level.set(id, 0); y.set(id, i * CIRCUIT_YSTEP); });
+
+  function getLevel(id) {
+    if (level.has(id)) return level.get(id);
+    const node = builder.nodes.get(id);
+    const lvl = Math.max(...node.inputs.map(getLevel)) + 1;
+    level.set(id, lvl);
+    return lvl;
+  }
+  reachable.forEach(getLevel);
+
+  const maxLevel = Math.max(...[...reachable].map(id => level.get(id)));
+  const byLevel = [];
+  for (let l = 0; l <= maxLevel; l++) byLevel.push([]);
+  reachable.forEach(id => byLevel[level.get(id)].push(id));
+
+  for (let l = 1; l <= maxLevel; l++) {
+    const raw = byLevel[l].map(id => {
+      const node = builder.nodes.get(id);
+      const uniqueInputs = [...new Set(node.inputs)];
+      const val = uniqueInputs.reduce((s, cid) => s + y.get(cid), 0) / uniqueInputs.length;
+      return { id, val, h: nodeHeight(builder, id) };
+    });
+    raw.sort((a, b) => a.val - b.val || (a.id < b.id ? -1 : 1));
+
+    let prevBottom = null;
+    raw.forEach(({ id, val, h }) => {
+      const halfH = h / 2;
+      const center = prevBottom === null ? val : Math.max(val, prevBottom + CIRCUIT_GATE_GAP + halfH);
+      y.set(id, center);
+      prevBottom = center + halfH;
+    });
+  }
+
+  return { level, y };
+}
 
 function layoutDAG(builder, rootId) {
   const reachable = new Set();
@@ -573,26 +628,7 @@ function layoutDAG(builder, rootId) {
     return ra - rb;
   });
 
-  const level = new Map(), y = new Map();
-  leaves.forEach((id, i) => { level.set(id, 0); y.set(id, i * CIRCUIT_YSTEP); });
-
-  function getLevel(id) {
-    if (level.has(id)) return level.get(id);
-    const node = builder.nodes.get(id);
-    const lvl = Math.max(...node.inputs.map(getLevel)) + 1;
-    level.set(id, lvl);
-    return lvl;
-  }
-  function getY(id) {
-    if (y.has(id)) return y.get(id);
-    const node = builder.nodes.get(id);
-    const uniqueInputs = [...new Set(node.inputs)];
-    const val = uniqueInputs.reduce((s, cid) => s + getY(cid), 0) / uniqueInputs.length;
-    y.set(id, val);
-    return val;
-  }
-  reachable.forEach(id => { getLevel(id); getY(id); });
-
+  const { level, y } = assignLevelsAndY(builder, reachable, leaves);
   return { reachable, level, y };
 }
 
@@ -903,6 +939,885 @@ function generate() {
   }
 }
 
+/* -------------------------------------------------------------------------
+   10. ARITHMETIC CORE — bit-level adder / subtractor / multiplier logic.
+   Bit arrays throughout this section are LSB-first (index 0 = bit 0), which
+   is the natural order for ripple-carry/borrow propagation. Conversion to
+   and from the MSB-first binary strings the user types happens at the
+   input/output boundary only (see section 13).
+   ------------------------------------------------------------------------- */
+
+function intToBitsLSB(n, width) {
+  const bits = [];
+  let v = BigInt(n);
+  for (let i = 0; i < width; i++) { bits.push(Number(v & 1n)); v >>= 1n; }
+  return bits;
+}
+function bitsLSBToBigInt(bits) {
+  let v = 0n;
+  for (let i = bits.length - 1; i >= 0; i--) v = (v << 1n) | BigInt(bits[i]);
+  return v;
+}
+function padMSB(bits, width) {
+  const out = bits.slice();
+  while (out.length < width) out.push(0);
+  return out;
+}
+function bitsLSBToDisplayString(bits) {
+  return bits.slice().reverse().join('');
+}
+function displayStringToBitsLSB(str) {
+  return str.trim().split('').reverse().map(ch => (ch === '1' ? 1 : 0));
+}
+
+function halfAdd(a, b) { return { sum: a ^ b, cout: a & b }; }
+function fullAdd(a, b, cin) {
+  const s1 = a ^ b;
+  return { sum: s1 ^ cin, cout: (a & b) | (cin & s1) };
+}
+function halfSub(a, b) { return { diff: a ^ b, bout: (a === 0 && b === 1) ? 1 : 0 }; }
+function fullSub(a, b, bin) {
+  const d1 = a ^ b;
+  const diff = d1 ^ bin;
+  const notA = a ? 0 : 1;
+  const bout = (notA & b) | (notA & bin) | (b & bin);
+  return { diff, bout };
+}
+
+/* Ripple-carry adder over two equal-width LSB-first bit arrays. Bit 0 uses
+   a Half Adder (no carry-in); every later bit uses a Full Adder, so the
+   carry chain propagates correctly across the whole width. */
+function rippleCarryAdd(aBits, bBits) {
+  const n = aBits.length;
+  const sumBits = [];
+  const cells = [];
+  let cin = 0;
+  for (let i = 0; i < n; i++) {
+    const a = aBits[i], b = bBits[i];
+    let sum, cout, type;
+    if (i === 0) { const r = halfAdd(a, b); sum = r.sum; cout = r.cout; type = 'HA'; }
+    else { const r = fullAdd(a, b, cin); sum = r.sum; cout = r.cout; type = 'FA'; }
+    cells.push({ type, a, b, cin: i === 0 ? null : cin, sum, cout });
+    sumBits.push(sum);
+    cin = cout;
+  }
+  return { sumBits, carryOut: cin, cells };
+}
+
+/* Ripple-borrow subtractor: A - B, bit 0 uses a Half Subtractor, later bits
+   use Full Subtractors so borrow propagates correctly. */
+function rippleBorrowSub(aBits, bBits) {
+  const n = aBits.length;
+  const diffBits = [];
+  const cells = [];
+  let bin = 0;
+  for (let i = 0; i < n; i++) {
+    const a = aBits[i], b = bBits[i];
+    let diff, bout, type;
+    if (i === 0) { const r = halfSub(a, b); diff = r.diff; bout = r.bout; type = 'HS'; }
+    else { const r = fullSub(a, b, bin); diff = r.diff; bout = r.bout; type = 'FS'; }
+    cells.push({ type, a, b, bin: i === 0 ? null : bin, diff, bout });
+    diffBits.push(diff);
+    bin = bout;
+  }
+  return { diffBits, borrowOut: bin, cells };
+}
+
+/* Multi-operand addition: (((A+B)+C)+D) ..., each stage a full ripple-carry
+   adder. The running total grows by one bit per stage so overflow/carry
+   from every stage is preserved. */
+function multiOperandAdd(operandBitsList) {
+  let acc = operandBitsList[0];
+  const stages = [];
+  for (let k = 1; k < operandBitsList.length; k++) {
+    const width = Math.max(acc.length, operandBitsList[k].length);
+    const aP = padMSB(acc, width);
+    const bP = padMSB(operandBitsList[k], width);
+    const { sumBits, carryOut, cells } = rippleCarryAdd(aP, bP);
+    const resultBits = sumBits.concat([carryOut]);
+    stages.push({ aBits: aP, bBits: bP, sumBits, carryOut, cells, resultBits, width });
+    acc = resultBits;
+  }
+  return { finalBits: acc, stages };
+}
+
+/* Multi-operand subtraction: (((A-B)-C)-D) ..., evaluated left to right at
+   a fixed bit width. A borrow-out of 1 at any stage means that stage's
+   difference went negative (wrapped around modulo 2^width). */
+function multiOperandSub(operandBitsList) {
+  const width = operandBitsList[0].length;
+  let acc = operandBitsList[0];
+  const stages = [];
+  for (let k = 1; k < operandBitsList.length; k++) {
+    const bP = padMSB(operandBitsList[k], width);
+    const { diffBits, borrowOut, cells } = rippleBorrowSub(acc, bP);
+    stages.push({ aBits: acc, bBits: bP, diffBits, borrowOut, cells, width });
+    acc = diffBits;
+  }
+  return { finalBits: acc, stages, width };
+}
+
+/* Array multiplier for two operands: AND-gate partial products, shifted by
+   bit position, then summed with sequential ripple-carry adds (each row is
+   already the full product width, so no separate width-growth bookkeeping
+   is needed here). */
+function multiplyTwo(aBits, bBits) {
+  const n = aBits.length, m = bBits.length;
+  const partials = [];
+  for (let j = 0; j < m; j++) {
+    const row = new Array(n + m).fill(0);
+    for (let i = 0; i < n; i++) row[i + j] = aBits[i] & bBits[j];
+    partials.push(row);
+  }
+  let acc = partials[0];
+  const addSteps = [];
+  for (let j = 1; j < partials.length; j++) {
+    const { sumBits, carryOut, cells } = rippleCarryAdd(acc, partials[j]);
+    addSteps.push({ a: acc, b: partials[j], sumBits, carryOut, cells });
+    acc = sumBits;
+  }
+  return { productBits: acc, partials, addSteps };
+}
+
+function multiOperandMultiply(operandBitsList) {
+  let acc = operandBitsList[0];
+  const steps = [];
+  for (let k = 1; k < operandBitsList.length; k++) {
+    const r = multiplyTwo(acc, operandBitsList[k]);
+    steps.push({ multiplicand: acc, multiplier: operandBitsList[k], result: r });
+    acc = r.productBits;
+  }
+  return { finalBits: acc, steps };
+}
+
+/* -------------------------------------------------------------------------
+   11. Reusable single-cell circuit generation. A Half/Full Adder or
+   Half/Full Subtractor (or the AND cell used for a multiplier's partial
+   products) is just a small Boolean function — so instead of hand-wiring
+   gate trees for them, we compute their truth tables and feed them through
+   the SAME Quine–McCluskey + CircuitBuilder pipeline already used for the
+   Boolean-function tool (getPrimeImplicants / selectEssentialPIs /
+   buildBasicPlan / buildNANDPlan / buildNORPlan). That guarantees the
+   arithmetic cells' basic/NAND/NOR circuits are exactly as correct as the
+   already-tested Boolean-function ones, with no duplicated logic.
+   ------------------------------------------------------------------------- */
+
+function truthTableFor(fn, varNames) {
+  const numVars = varNames.length;
+  const total = 1 << numVars;
+  const minterms = [];
+  for (let i = 0; i < total; i++) {
+    const bits = i.toString(2).padStart(numVars, '0');
+    const assign = {};
+    for (let v = 0; v < numVars; v++) assign[varNames[v]] = bits[v] === '1' ? 1 : 0;
+    if (fn(assign)) minterms.push(i);
+  }
+  return minterms;
+}
+
+/* fns: [{ label, fn }, ...] — one entry per output of the cell (e.g. Sum and
+   Carry for a Full Adder). All outputs are built into the SAME builder per
+   circuit type, so shared input literals/inverters are only built once and
+   fanned out — exactly like the multi-output real chip would be wired. */
+function buildCellCircuits(fns, varNames) {
+  const numVars = varNames.length;
+  const outputs = fns.map(({ label, fn }) => {
+    const minterms = truthTableFor(fn, varNames);
+    const allPIs = getPrimeImplicants(minterms, numVars);
+    const essential = selectEssentialPIs(minterms, [], allPIs);
+    const piTerms = essential.map(p => p.bin);
+    const exprStr = piTermsToExpression(piTerms, varNames);
+    return { label, minterms, piTerms, exprStr };
+  });
+
+  const basicBuilder = new CircuitBuilder();
+  const basicRoots = outputs.map(o => ({ id: buildBasicPlan(basicBuilder, o.piTerms, varNames), label: o.label }));
+  const nandBuilder = new CircuitBuilder();
+  const nandRoots = outputs.map(o => ({ id: buildNANDPlan(nandBuilder, o.piTerms, varNames), label: o.label }));
+  const norBuilder = new CircuitBuilder();
+  const norRoots = outputs.map(o => ({ id: buildNORPlan(norBuilder, o.piTerms, varNames), label: o.label }));
+
+  return { outputs, varNames, basicBuilder, basicRoots, nandBuilder, nandRoots, norBuilder, norRoots };
+}
+
+/* Cell definitions used by the Adder / Subtractor / Multiplier modules. */
+const CELL_DEFS = {
+  HA: { varNames: ['A', 'B'], fns: [
+    { label: 'S', fn: a => a.A ^ a.B },
+    { label: 'Cout', fn: a => a.A & a.B }
+  ]},
+  FA: { varNames: ['A', 'B', 'CIN'], fns: [
+    { label: 'S', fn: a => a.A ^ a.B ^ a.CIN },
+    { label: 'Cout', fn: a => (a.A & a.B) | (a.CIN & (a.A ^ a.B)) }
+  ]},
+  HS: { varNames: ['A', 'B'], fns: [
+    { label: 'D', fn: a => a.A ^ a.B },
+    { label: 'Bout', fn: a => ((a.A ? 0 : 1) & a.B) }
+  ]},
+  FS: { varNames: ['A', 'B', 'BIN'], fns: [
+    { label: 'D', fn: a => a.A ^ a.B ^ a.BIN },
+    { label: 'Bout', fn: a => ((a.A ? 0 : 1) & a.B) | ((a.A ? 0 : 1) & a.BIN) | (a.B & a.BIN) }
+  ]},
+  AND2: { varNames: ['A', 'B'], fns: [
+    { label: 'P', fn: a => a.A & a.B }
+  ]}
+};
+
+const cellCircuitCache = new Map();
+function getCellCircuits(cellType) {
+  if (cellCircuitCache.has(cellType)) return cellCircuitCache.get(cellType);
+  const def = CELL_DEFS[cellType];
+  const built = buildCellCircuits(def.fns, def.varNames);
+  cellCircuitCache.set(cellType, built);
+  return built;
+}
+
+/* -------------------------------------------------------------------------
+   12. Multi-output circuit diagram rendering. Generalizes layoutDAG /
+   buildCircuitSVGFromDAG (section 6) to a DAG with several output roots
+   that share input literals — needed because a Half/Full Adder or
+   Subtractor cell has two outputs (Sum & Carry, or Diff & Borrow) built
+   from the same input wires. The original single-root functions are left
+   untouched so the Boolean-function tool's rendering is unaffected.
+   ------------------------------------------------------------------------- */
+
+function layoutDAGMulti(builder, rootIds, varOrder) {
+  const reachable = new Set();
+  (function dfs(id) {
+    if (reachable.has(id)) return;
+    reachable.add(id);
+    builder.nodes.get(id).inputs.forEach(dfs);
+  })(rootIds[0]);
+  rootIds.slice(1).forEach(rid => {
+    (function dfs(id) {
+      if (reachable.has(id)) return;
+      reachable.add(id);
+      builder.nodes.get(id).inputs.forEach(dfs);
+    })(rid);
+  });
+
+  const leaves = [...reachable].filter(id => builder.nodes.get(id).inputs.length === 0);
+  leaves.sort((a, b) => {
+    const na = builder.nodes.get(a), nb = builder.nodes.get(b);
+    const order = varOrder || VARNAMES;
+    const ra = na.type === 'VAR' ? order.indexOf(na.name) : 99;
+    const rb = nb.type === 'VAR' ? order.indexOf(nb.name) : 99;
+    return ra - rb;
+  });
+
+  const { level, y } = assignLevelsAndY(builder, reachable, leaves);
+  return { reachable, level, y };
+}
+
+function buildCircuitSVGFromDAGMulti(builder, roots, varOrder) {
+  const rootIds = roots.map(r => r.id);
+  const { reachable, level, y } = layoutDAGMulti(builder, rootIds, varOrder);
+  const nodes = [...reachable].map(id => builder.nodes.get(id));
+  const leafNodes = nodes.filter(n => n.inputs.length === 0);
+  const gateNodes = nodes.filter(n => n.inputs.length > 0).sort((a, b) => level.get(a.id) - level.get(b.id));
+
+  const maxLevel = Math.max(...nodes.map(n => level.get(n.id)));
+  const maxY = Math.max(...nodes.map(n => y.get(n.id)));
+  const width = CIRCUIT_LEFT + maxLevel * CIRCUIT_XSTEP + 190;
+  const height = CIRCUIT_TOP * 2 + maxY + 20;
+
+  let svg = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" class="circuit-svg" role="img" aria-label="Logic circuit diagram">`;
+  svg += `<style>
+    .gwire{stroke:var(--ink-muted);stroke-width:1.6;fill:none;}
+    .gshape{stroke:var(--ink);stroke-width:1.6;fill:var(--surface-raised);}
+    .gbubble{stroke:var(--ink);stroke-width:1.6;fill:var(--surface);}
+    .glabel{font-family:var(--font-mono);font-size:13px;fill:var(--ink);}
+    .goutlabel{font-family:var(--font-mono);font-size:13px;fill:var(--accent);font-weight:600;}
+  </style>`;
+
+  const posX = id => CIRCUIT_LEFT + level.get(id) * CIRCUIT_XSTEP;
+  const posY = id => CIRCUIT_TOP + y.get(id);
+  const outX = new Map();
+
+  leafNodes.forEach(n => {
+    const label = n.type === 'VAR' ? n.name : (n.type === 'CONST0' ? '0' : '1');
+    const lx = posX(n.id), ly = posY(n.id);
+    svg += `<text x="${lx - 10}" y="${ly + 5}" text-anchor="end" class="glabel">${escapeHtml(label)}</text>`;
+    svg += `<line x1="${lx}" y1="${ly}" x2="${lx + 20}" y2="${ly}" class="gwire"/>`;
+    outX.set(n.id, lx + 20);
+  });
+
+  gateNodes.forEach(n => {
+    const dims = shapeFor(n.type, n.inputs.length);
+    const gx = posX(n.id), gy = posY(n.id);
+    svg += drawGate(gx, gy, n.type, dims);
+    outX.set(n.id, gx + dims.outTip + (dims.bubble ? dims.bubbleR * 2 : 0));
+
+    const count = n.inputs.length;
+    const inputYs = count === 1 ? [gy] : n.inputs.map((_, idx) => gy - ((count - 1) * 10) + idx * 20);
+    n.inputs.forEach((cid, idx) => {
+      const py = inputYs[idx];
+      const startX = outX.get(cid), startY = posY(cid);
+      const midX = (startX + gx) / 2;
+      svg += `<path d="M${startX},${startY} H${midX} V${py} H${gx}" class="gwire"/>`;
+    });
+  });
+
+  roots.forEach(r => {
+    const rootX = outX.get(r.id), rootY = posY(r.id);
+    svg += `<line x1="${rootX}" y1="${rootY}" x2="${rootX + 30}" y2="${rootY}" class="gwire"/>`;
+    svg += `<text x="${rootX + 38}" y="${rootY + 5}" class="goutlabel">${escapeHtml(r.label)}</text>`;
+  });
+  svg += `</svg>`;
+  return svg;
+}
+
+function renderCellDiagram(containerEl, cellType, planKind) {
+  const built = getCellCircuits(cellType);
+  const builder = planKind === 'basic' ? built.basicBuilder : planKind === 'nand' ? built.nandBuilder : built.norBuilder;
+  const roots = planKind === 'basic' ? built.basicRoots : planKind === 'nand' ? built.nandRoots : built.norRoots;
+  containerEl.innerHTML = buildCircuitSVGFromDAGMulti(builder, roots, built.varNames);
+}
+
+/* -------------------------------------------------------------------------
+   13. Block/chain diagrams — one labeled HA/FA/HS/FS/AND2 box per bit
+   position, wired left-to-right with the carry/borrow ripple running along
+   the bottom. Signal values are annotated on the wires so the diagram
+   doubles as a worked example for the operands actually entered. Kept
+   deliberately separate from the gate-level DAG renderer above: expanding
+   an 8-bit 4-operand adder down to individual AND/OR/XOR gates would
+   produce an unreadable diagram, whereas a block-per-bit chain stays clear
+   at any width and still shows exactly how the multi-bit circuit is built
+   from Half/Full Adders (with the true gate-level view available separately
+   for the single reusable cell).
+   ------------------------------------------------------------------------- */
+
+const CHAIN_CELL_W = 74, CHAIN_CELL_H = 58, CHAIN_GAP = 46, CHAIN_LEFT = 60, CHAIN_TOP = 56;
+
+function renderChainRowSVG(cells, opts) {
+  const n = cells.length;
+  const width = CHAIN_LEFT + n * (CHAIN_CELL_W + CHAIN_GAP) + 60;
+  const height = CHAIN_TOP + CHAIN_CELL_H + 70;
+  const carryLabel = opts.carryLabel || 'C';
+  const topLabels = opts.topLabels; // fn(i) -> [labelTop1, labelTop2]
+  const sumLabel = opts.sumLabel || 'S';
+  const bitLabel = opts.bitLabel || 'bit';
+
+  let svg = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" class="circuit-svg" role="img" aria-label="${escapeHtml(opts.ariaLabel || 'Ripple chain diagram')}">`;
+  svg += `<style>
+    .cwire{stroke:var(--ink-muted);stroke-width:1.6;fill:none;}
+    .cbox{stroke:var(--ink);stroke-width:1.6;fill:var(--surface-raised);}
+    .clabel{font-family:var(--font-mono);font-size:12px;fill:var(--ink);}
+    .cvallabel{font-family:var(--font-mono);font-size:11px;fill:var(--cyan);font-weight:600;}
+    .ctypelabel{font-family:var(--font-display);font-size:13px;font-weight:700;fill:var(--ink);}
+    .coutlabel{font-family:var(--font-mono);font-size:12px;fill:var(--accent);font-weight:600;}
+  </style>`;
+
+  let prevCarryX = null, prevCarryY = null;
+  for (let i = 0; i < n; i++) {
+    const cx = CHAIN_LEFT + i * (CHAIN_CELL_W + CHAIN_GAP);
+    const cy = CHAIN_TOP;
+    const c = cells[i];
+    const [labA, labB] = topLabels(i);
+
+    // top inputs
+    svg += `<text x="${cx + CHAIN_CELL_W * 0.28}" y="${cy - 30}" text-anchor="middle" class="clabel">${escapeHtml(labA)}</text>`;
+    svg += `<text x="${cx + CHAIN_CELL_W * 0.72}" y="${cy - 30}" text-anchor="middle" class="clabel">${escapeHtml(labB)}</text>`;
+    svg += `<text x="${cx + CHAIN_CELL_W * 0.28}" y="${cy - 14}" text-anchor="middle" class="cvallabel">${c.a}</text>`;
+    svg += `<text x="${cx + CHAIN_CELL_W * 0.72}" y="${cy - 14}" text-anchor="middle" class="cvallabel">${c.b}</text>`;
+    svg += `<line x1="${cx + CHAIN_CELL_W * 0.28}" y1="${cy - 8}" x2="${cx + CHAIN_CELL_W * 0.28}" y2="${cy}" class="cwire"/>`;
+    svg += `<line x1="${cx + CHAIN_CELL_W * 0.72}" y1="${cy - 8}" x2="${cx + CHAIN_CELL_W * 0.72}" y2="${cy}" class="cwire"/>`;
+
+    // box
+    svg += `<rect x="${cx}" y="${cy}" width="${CHAIN_CELL_W}" height="${CHAIN_CELL_H}" rx="8" class="cbox"/>`;
+    svg += `<text x="${cx + CHAIN_CELL_W / 2}" y="${cy + CHAIN_CELL_H / 2 + 5}" text-anchor="middle" class="ctypelabel">${c.type}</text>`;
+
+    // carry/borrow in (left side), if any
+    const carryInVal = c.cin !== undefined ? c.cin : c.bin;
+    if (carryInVal !== null && carryInVal !== undefined) {
+      const py = cy + CHAIN_CELL_H * 0.78;
+      if (prevCarryX !== null) {
+        svg += `<path d="M${prevCarryX},${prevCarryY} L${cx},${py}" class="cwire"/>`;
+      } else {
+        svg += `<line x1="${cx - 22}" y1="${py}" x2="${cx}" y2="${py}" class="cwire"/>`;
+        svg += `<text x="${cx - 26}" y="${py + 4}" text-anchor="end" class="clabel">0</text>`;
+      }
+      svg += `<text x="${cx + 4}" y="${py - 6}" class="cvallabel">${carryInVal}</text>`;
+    }
+
+    // sum/diff out (bottom)
+    const sumVal = c.sum !== undefined ? c.sum : c.diff;
+    svg += `<line x1="${cx + CHAIN_CELL_W / 2}" y1="${cy + CHAIN_CELL_H}" x2="${cx + CHAIN_CELL_W / 2}" y2="${cy + CHAIN_CELL_H + 26}" class="cwire"/>`;
+    svg += `<text x="${cx + CHAIN_CELL_W / 2}" y="${cy + CHAIN_CELL_H + 42}" text-anchor="middle" class="coutlabel">${sumLabel}${n - 1 - i}=${sumVal}</text>`;
+    svg += `<text x="${cx + CHAIN_CELL_W / 2}" y="${cy + CHAIN_CELL_H + 56}" text-anchor="middle" class="clabel">${bitLabel} ${n - 1 - i}</text>`;
+
+    // carry/borrow out (right side), feeds next cell
+    const carryOutVal = c.cout !== undefined ? c.cout : c.bout;
+    const outX = cx + CHAIN_CELL_W;
+    const outY = cy + CHAIN_CELL_H * 0.78;
+    prevCarryX = outX; prevCarryY = outY;
+  }
+
+  // final carry/borrow out
+  const lastC = cells[n - 1];
+  const finalOutVal = lastC.cout !== undefined ? lastC.cout : lastC.bout;
+  const lastCx = CHAIN_LEFT + (n - 1) * (CHAIN_CELL_W + CHAIN_GAP) + CHAIN_CELL_W;
+  const lastCy = CHAIN_TOP + CHAIN_CELL_H * 0.78;
+  svg += `<line x1="${lastCx}" y1="${lastCy}" x2="${lastCx + 26}" y2="${lastCy}" class="cwire"/>`;
+  svg += `<text x="${lastCx + 32}" y="${lastCy + 4}" class="coutlabel">${carryLabel}=${finalOutVal}</text>`;
+
+  svg += `</svg>`;
+  return svg;
+}
+
+/* -------------------------------------------------------------------------
+   14. View switching (Boolean Function / Adder / Subtractor / Multiplier)
+   ------------------------------------------------------------------------- */
+
+const HERO_CONTENT = {
+  boolean: {
+    eyebrow: 'Truth tables · Minterms · Maxterms · Expressions',
+    title: 'Feed it a function.<br>Get back the whole circuit.',
+    sub: 'Enter a Boolean function any way you have it — a truth table, a list of minterms or maxterms, or a raw expression. This tool simplifies it, draws the gate-level circuit, and rebuilds it using only NAND gates and only NOR gates — then checks that all four agree on every input row.'
+  },
+  adder: {
+    eyebrow: 'Half Adders · Full Adders · Ripple Carry',
+    title: 'Add multiple binary operands.<br>See every carry propagate.',
+    sub: 'Choose how many operands and how many bits, and the tool builds the ripple-carry chain from Half and Full Adders, shows the Sum/Carry Boolean expressions, and renders the basic-gate, NAND-only and NOR-only circuits for the underlying adder cell.'
+  },
+  subtractor: {
+    eyebrow: 'Half Subtractors · Full Subtractors · Borrow Propagation',
+    title: 'Subtract across multiple operands.<br>Track every borrow.',
+    sub: 'A − B − C − D is evaluated left to right as ((A − B) − C) − D. Each stage is a ripple-borrow chain of Half/Full Subtractors, with Diff/Borrow expressions and basic/NAND/NOR circuits for the underlying subtractor cell.'
+  },
+  multiplier: {
+    eyebrow: 'Partial Products · AND Gates · Adder Tree',
+    title: 'Multiply binary operands.<br>Watch the partial products add up.',
+    sub: 'Pick bit-widths for each operand and the tool forms the AND-gate partial products, shifts them, and sums them with the same ripple-carry machinery as the Adder module — with the underlying AND cell shown in basic/NAND/NOR form.'
+  }
+};
+
+function setActiveView(view) {
+  document.querySelectorAll('.view').forEach(el => {
+    el.classList.toggle('is-hidden', el.dataset.view !== view);
+  });
+  document.querySelectorAll('.nav-tab').forEach(btn => {
+    btn.classList.toggle('is-active', btn.dataset.view === view);
+    btn.setAttribute('aria-current', btn.dataset.view === view ? 'page' : 'false');
+  });
+  const hero = HERO_CONTENT[view];
+  if (hero) {
+    const eyebrowEl = document.querySelector('.hero .eyebrow');
+    const titleEl = document.querySelector('.hero-title');
+    const subEl = document.querySelector('.hero-sub');
+    if (eyebrowEl) eyebrowEl.textContent = hero.eyebrow;
+    if (titleEl) titleEl.innerHTML = hero.title;
+    if (subEl) subEl.textContent = hero.sub;
+  }
+  try { localStorage.setItem('bool-circuit-view', view); } catch (e) { /* ignore */ }
+}
+
+/* -------------------------------------------------------------------------
+   15. Operand-input helpers shared by Adder / Subtractor / Multiplier
+   ------------------------------------------------------------------------- */
+
+function buildOperandInputs(containerId, operandCount, bitWidth, opts) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const names = ['A', 'B', 'C', 'D'].slice(0, operandCount);
+  const widthOf = (idx) => (opts && opts.perOperandWidths) ? opts.perOperandWidths[idx] : bitWidth;
+  container.innerHTML = names.map((nm, idx) => {
+    const w = widthOf(idx);
+    const defaultVal = (opts && opts.defaults && opts.defaults[idx]) || '0'.repeat(w);
+    return `
+      <div class="control-field operand-field">
+        <label for="${containerId}-op-${idx}">Operand ${nm} <span class="tag">${w}-bit</span></label>
+        <input type="text" id="${containerId}-op-${idx}" class="text-input mono operand-input"
+               data-operand-index="${idx}" data-bit-width="${w}"
+               maxlength="${w}" inputmode="numeric" autocomplete="off"
+               placeholder="${defaultVal}" value="${defaultVal}">
+      </div>`;
+  }).join('');
+}
+
+function readOperandBits(containerId, operandCount) {
+  const results = [];
+  for (let i = 0; i < operandCount; i++) {
+    const el = document.getElementById(`${containerId}-op-${i}`);
+    if (!el) throw new Error('Operand inputs are out of sync — try changing the operand count again.');
+    const raw = el.value.trim();
+    const width = parseInt(el.dataset.bitWidth, 10);
+    if (!/^[01]+$/.test(raw)) throw new Error(`Operand ${String.fromCharCode(65 + i)} must contain only 0s and 1s.`);
+    if (raw.length > width) throw new Error(`Operand ${String.fromCharCode(65 + i)} has more than ${width} bits.`);
+    const padded = raw.padStart(width, '0');
+    results.push({ bitsLSB: displayStringToBitsLSB(padded), display: padded, width });
+  }
+  return results;
+}
+
+function renderCellReference(prefix, cellType) {
+  const built = getCellCircuits(cellType);
+  const outNames = built.outputs.map(o => o.label).join(', ');
+  const exprHtml = built.outputs.map(o =>
+    `<p class="mono-result">${escapeHtml(o.label)} = ${escapeHtml(o.exprStr)}</p>`
+  ).join('');
+  const exprEl = document.querySelector(`#${prefix}-result-expr .result-body`);
+  if (exprEl) exprEl.innerHTML = exprHtml;
+
+  const truthEl = document.querySelector(`#${prefix}-result-truth .result-body`);
+  if (truthEl) {
+    const varNames = built.varNames;
+    const total = 1 << varNames.length;
+    let html = '<div class="table-scroll"><table class="truth-table"><thead><tr>';
+    varNames.forEach(v => { html += `<th scope="col">${v}</th>`; });
+    built.outputs.forEach(o => { html += `<th scope="col" class="th-output">${escapeHtml(o.label)}</th>`; });
+    html += '</tr></thead><tbody>';
+    for (let i = 0; i < total; i++) {
+      const bits = i.toString(2).padStart(varNames.length, '0');
+      html += '<tr>';
+      bits.split('').forEach(b => { html += `<td>${b}</td>`; });
+      built.outputs.forEach(o => { html += `<td>${o.minterms.includes(i) ? 1 : 0}</td>`; });
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    truthEl.innerHTML = html;
+  }
+
+  ['basic', 'nand', 'nor'].forEach(kind => {
+    const el = document.querySelector(`#${prefix}-result-${kind} .diagram-body`);
+    if (el) renderCellDiagram(el, cellType, kind);
+  });
+
+  return outNames;
+}
+
+/* Cross-checks a cell's basic/NAND/NOR circuits against its own truth table
+   (they're built from the same piTerms, so this mainly guards against a
+   future regression rather than catching anything today). */
+function verifyCellEquivalence(cellType) {
+  const built = getCellCircuits(cellType);
+  const varNames = built.varNames;
+  const total = 1 << varNames.length;
+  let ok = true;
+  for (let i = 0; i < total && ok; i++) {
+    const bits = i.toString(2).padStart(varNames.length, '0');
+    const assign = {};
+    varNames.forEach((v, idx) => { assign[v] = bits[idx] === '1' ? 1 : 0; });
+    built.outputs.forEach((o, oi) => {
+      const expected = o.minterms.includes(i) ? 1 : 0;
+      const basic = evalDAGNode(built.basicBuilder, built.basicRoots[oi].id, assign, new Map());
+      const nand = evalDAGNode(built.nandBuilder, built.nandRoots[oi].id, assign, new Map());
+      const nor = evalDAGNode(built.norBuilder, built.norRoots[oi].id, assign, new Map());
+      if (basic !== expected || nand !== expected || nor !== expected) ok = false;
+    });
+  }
+  return ok;
+}
+
+function renderModuleVerification(prefix, items) {
+  const el = document.querySelector(`#${prefix}-result-verify .result-body`);
+  if (!el) return;
+  const listHtml = items.map(it =>
+    `<li class="verify-item" data-status="${it.pass ? 'pass' : 'fail'}"><span class="verify-dot" aria-hidden="true"></span>${escapeHtml(it.label)}</li>`
+  ).join('');
+  const allPass = items.every(it => it.pass);
+  el.innerHTML = `<ul class="verify-list">${listHtml}</ul>` +
+    `<p class="placeholder-text">${allPass ? 'All checks passed. ✓' : 'Mismatch detected — check the highlighted item(s) above.'}</p>`;
+}
+
+function moduleShowError(prefix, msg) {
+  let banner = document.getElementById(`${prefix}-error-banner`);
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = `${prefix}-error-banner`;
+    banner.className = 'error-banner';
+    const anchor = document.getElementById(`${prefix}-input-section`);
+    if (anchor) anchor.parentNode.insertBefore(banner, anchor);
+  }
+  banner.textContent = msg;
+  banner.style.display = 'block';
+}
+function moduleClearError(prefix) {
+  const banner = document.getElementById(`${prefix}-error-banner`);
+  if (banner) banner.style.display = 'none';
+}
+
+/* -------------------------------------------------------------------------
+   16. Adder module
+   ------------------------------------------------------------------------- */
+
+function renderAdderChain(prefix, stages) {
+  const el = document.querySelector(`#${prefix}-result-chain .result-body`);
+  if (!el) return;
+  let html = '';
+  stages.forEach((stage, si) => {
+    const label = stages.length === 1
+      ? 'Ripple-carry adder'
+      : `Stage ${si + 1} of ${stages.length} — adding operand ${String.fromCharCode(65 + si + 1)}`;
+    html += `<h4 class="chain-stage-title">${escapeHtml(label)}</h4>`;
+    const cellsMSBFirst = stage.cells.slice().reverse();
+    html += renderChainRowSVG(cellsMSBFirst, {
+      carryLabel: 'Cout',
+      sumLabel: 'S',
+      bitLabel: 'bit',
+      topLabels: (i) => ['a', 'b'],
+      ariaLabel: `Ripple-carry adder stage ${si + 1}`
+    });
+  });
+  el.innerHTML = html;
+}
+
+function generateAdder() {
+  moduleClearError('add');
+  try {
+    const operandCount = parseInt(document.getElementById('add-operand-count').value, 10);
+    const bitWidth = parseInt(document.getElementById('add-bit-width').value, 10);
+    const operands = readOperandBits('add-operand-inputs', operandCount);
+
+    const { finalBits, stages } = multiOperandAdd(operands.map(o => o.bitsLSB));
+    const resultStr = bitsLSBToDisplayString(finalBits);
+    const decimalSum = operands.reduce((s, o) => s + bitsLSBToBigInt(o.bitsLSB), 0n);
+
+    const summaryEl = document.querySelector('#add-result-summary .result-body');
+    if (summaryEl) {
+      const opsHtml = operands.map((o, i) => `<p>Operand ${String.fromCharCode(65 + i)}: <span class="mono-result">${o.display}</span> (${bitsLSBToBigInt(o.bitsLSB)})</p>`).join('');
+      summaryEl.innerHTML = opsHtml +
+        `<p class="field-hint">Sum expression: ${operands.map((_, i) => String.fromCharCode(65 + i)).join(' + ')}</p>` +
+        `<p class="mono-result">Result = ${resultStr} (${decimalSum.toString()})</p>`;
+    }
+
+    renderCellReference('add', operandCount === 2 && bitWidth === 1 ? 'HA' : 'FA');
+    renderAdderChain('add', stages);
+
+    const cellOk = verifyCellEquivalence('FA') && verifyCellEquivalence('HA');
+    const arithmeticOk = bitsLSBToBigInt(finalBits) === decimalSum;
+    let carryOk = true;
+    stages.forEach(stage => {
+      const expectedCarry = (bitsLSBToBigInt(stage.aBits) + bitsLSBToBigInt(stage.bBits)) >= (1n << BigInt(stage.width));
+      if (Boolean(stage.carryOut) !== Boolean(expectedCarry)) carryOk = false;
+    });
+
+    renderModuleVerification('add', [
+      { label: 'Adder cell (Half/Full Adder) matches its truth table', pass: cellOk },
+      { label: 'Ripple-carry result matches direct binary addition', pass: arithmeticOk },
+      { label: 'Carry propagation matches expected overflow at each stage', pass: carryOk }
+    ]);
+  } catch (err) {
+    moduleShowError('add', err.message || 'Something went wrong — please check your operand values.');
+    console.error(err);
+  }
+}
+
+/* -------------------------------------------------------------------------
+   17. Subtractor module
+   ------------------------------------------------------------------------- */
+
+function renderSubtractorChain(prefix, stages) {
+  const el = document.querySelector(`#${prefix}-result-chain .result-body`);
+  if (!el) return;
+  let html = '';
+  stages.forEach((stage, si) => {
+    const label = stages.length === 1
+      ? 'Ripple-borrow subtractor'
+      : `Stage ${si + 1} of ${stages.length} — subtracting operand ${String.fromCharCode(65 + si + 1)}`;
+    html += `<h4 class="chain-stage-title">${escapeHtml(label)}</h4>`;
+    const cellsMSBFirst = stage.cells.slice().reverse();
+    html += renderChainRowSVG(cellsMSBFirst, {
+      carryLabel: 'Bout',
+      sumLabel: 'D',
+      bitLabel: 'bit',
+      topLabels: (i) => ['a', 'b'],
+      ariaLabel: `Ripple-borrow subtractor stage ${si + 1}`
+    });
+    if (stage.borrowOut) {
+      html += `<p class="field-hint">Borrow out = 1 at this stage — the running difference went negative and wrapped modulo 2<sup>${stage.width}</sup>.</p>`;
+    }
+  });
+  el.innerHTML = html;
+}
+
+function generateSubtractor() {
+  moduleClearError('sub');
+  try {
+    const operandCount = parseInt(document.getElementById('sub-operand-count').value, 10);
+    const bitWidth = parseInt(document.getElementById('sub-bit-width').value, 10);
+    const operands = readOperandBits('sub-operand-inputs', operandCount);
+
+    const { finalBits, stages, width } = multiOperandSub(operands.map(o => o.bitsLSB));
+    const resultStr = bitsLSBToDisplayString(finalBits);
+    const unsignedResult = bitsLSBToBigInt(finalBits);
+
+    const decimalVals = operands.map(o => bitsLSBToBigInt(o.bitsLSB));
+    const signedDifference = decimalVals.reduce((a, b) => a - b);
+    const modulus = 1n << BigInt(width);
+    const expectedUnsigned = ((signedDifference % modulus) + modulus) % modulus;
+    const overallNegative = signedDifference < 0n;
+
+    const summaryEl = document.querySelector('#sub-result-summary .result-body');
+    if (summaryEl) {
+      const opsHtml = operands.map((o, i) => `<p>Operand ${String.fromCharCode(65 + i)}: <span class="mono-result">${o.display}</span> (${decimalVals[i]})</p>`).join('');
+      summaryEl.innerHTML = opsHtml +
+        `<p class="field-hint">Evaluated as ${operands.map((_, i) => String.fromCharCode(65 + i)).join(' − ')}</p>` +
+        `<p class="mono-result">Result (mod 2<sup>${width}</sup>) = ${resultStr} (${unsignedResult.toString()})</p>` +
+        `<p class="mono-result">True signed difference = ${signedDifference.toString()}${overallNegative ? ' (negative — final borrow is set)' : ''}</p>`;
+    }
+
+    renderCellReference('sub', bitWidth === 1 ? 'HS' : 'FS');
+    renderSubtractorChain('sub', stages);
+
+    const cellOk = verifyCellEquivalence('FS') && verifyCellEquivalence('HS');
+    const arithmeticOk = unsignedResult === expectedUnsigned;
+    const borrowOk = Boolean(stages[stages.length - 1].borrowOut) === overallNegative;
+
+    renderModuleVerification('sub', [
+      { label: 'Subtractor cell (Half/Full Subtractor) matches its truth table', pass: cellOk },
+      { label: 'Ripple-borrow result matches direct binary subtraction (mod 2ⁿ)', pass: arithmeticOk },
+      { label: 'Final borrow flag matches whether the true difference is negative', pass: borrowOk }
+    ]);
+  } catch (err) {
+    moduleShowError('sub', err.message || 'Something went wrong — please check your operand values.');
+    console.error(err);
+  }
+}
+
+/* -------------------------------------------------------------------------
+   18. Multiplier module
+   ------------------------------------------------------------------------- */
+
+function renderPartialProductsTable(prefix, aDisplay, bDisplay, partials, productBits) {
+  const el = document.querySelector(`#${prefix}-result-partials .result-body`);
+  if (!el) return;
+  const width = partials[0].length;
+  const rowToStr = (row) => row.slice().reverse().join('');
+  let html = '<div class="table-scroll"><table class="truth-table partials-table"><tbody>';
+  html += `<tr><td colspan="2" class="pp-op-label">A</td><td class="mono-result pp-bits">${aDisplay.padStart(width, ' ')}</td></tr>`;
+  html += `<tr><td colspan="2" class="pp-op-label">×  B</td><td class="mono-result pp-bits">${bDisplay.padStart(width, ' ')}</td></tr>`;
+  html += `<tr><td colspan="3"><hr class="pp-rule"></td></tr>`;
+  partials.forEach((row, i) => {
+    html += `<tr><td class="pp-op-label">PP${i}</td><td></td><td class="mono-result pp-bits">${rowToStr(row)}</td></tr>`;
+  });
+  html += `<tr><td colspan="3"><hr class="pp-rule"></td></tr>`;
+  html += `<tr><td colspan="2" class="pp-op-label">Product</td><td class="mono-result pp-bits th-output">${rowToStr(productBits)}</td></tr>`;
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+}
+
+function renderMultiplierChain(prefix, steps) {
+  const el = document.querySelector(`#${prefix}-result-chain .result-body`);
+  if (!el) return;
+  let html = '';
+  steps.forEach((step, si) => {
+    step.result.addSteps.forEach((add, ai) => {
+      const label = steps.length === 1
+        ? `Summing partial products (add ${ai + 1} of ${step.result.addSteps.length})`
+        : `Multiply step ${si + 1}, summing partial products (add ${ai + 1} of ${step.result.addSteps.length})`;
+      html += `<h4 class="chain-stage-title">${escapeHtml(label)}</h4>`;
+      const cellsMSBFirst = add.cells.slice().reverse();
+      html += renderChainRowSVG(cellsMSBFirst, {
+        carryLabel: 'Cout',
+        sumLabel: 'S',
+        bitLabel: 'bit',
+        topLabels: () => ['a', 'b'],
+        ariaLabel: `Multiplier adder stage`
+      });
+    });
+  });
+  el.innerHTML = html;
+}
+
+function generateMultiplier() {
+  moduleClearError('mul');
+  try {
+    const operandCount = parseInt(document.getElementById('mul-operand-count').value, 10);
+    const bitWidths = [0, 1, 2, 3].slice(0, operandCount).map((_, i) =>
+      parseInt(document.getElementById(`mul-bit-width-${i}`).value, 10)
+    );
+    const operands = [];
+    for (let i = 0; i < operandCount; i++) {
+      const el = document.getElementById(`mul-operand-inputs-op-${i}`);
+      const raw = el.value.trim();
+      if (!/^[01]+$/.test(raw)) throw new Error(`Operand ${String.fromCharCode(65 + i)} must contain only 0s and 1s.`);
+      if (raw.length > bitWidths[i]) throw new Error(`Operand ${String.fromCharCode(65 + i)} has more than ${bitWidths[i]} bits.`);
+      const padded = raw.padStart(bitWidths[i], '0');
+      operands.push({ bitsLSB: displayStringToBitsLSB(padded), display: padded, width: bitWidths[i] });
+    }
+
+    const { finalBits, steps } = multiOperandMultiply(operands.map(o => o.bitsLSB));
+    const resultStr = bitsLSBToDisplayString(finalBits);
+    const decimalVals = operands.map(o => bitsLSBToBigInt(o.bitsLSB));
+    const expectedProduct = decimalVals.reduce((a, b) => a * b, 1n);
+    const actualProduct = bitsLSBToBigInt(finalBits);
+
+    const summaryEl = document.querySelector('#mul-result-summary .result-body');
+    if (summaryEl) {
+      const opsHtml = operands.map((o, i) => `<p>Operand ${String.fromCharCode(65 + i)}: <span class="mono-result">${o.display}</span> (${decimalVals[i]})</p>`).join('');
+      summaryEl.innerHTML = opsHtml +
+        `<p class="field-hint">${operands.map((_, i) => String.fromCharCode(65 + i)).join(' × ')}</p>` +
+        `<p class="mono-result">Result = ${resultStr} (${actualProduct.toString()})</p>`;
+    }
+
+    renderPartialProductsTable('mul', operands[0].display, operands[1].display, steps[0].result.partials, steps[0].result.productBits);
+    renderCellReference('mul', 'AND2');
+    renderMultiplierChain('mul', steps);
+
+    const cellOk = verifyCellEquivalence('AND2');
+    const arithmeticOk = actualProduct === expectedProduct;
+
+    renderModuleVerification('mul', [
+      { label: 'Partial-product AND cell matches its truth table', pass: cellOk },
+      { label: 'Partial products, shifted and summed, match direct binary multiplication', pass: arithmeticOk }
+    ]);
+  } catch (err) {
+    moduleShowError('mul', err.message || 'Something went wrong — please check your operand values.');
+    console.error(err);
+  }
+}
+
+/* -------------------------------------------------------------------------
+   19. Wiring for the Adder / Subtractor / Multiplier control panels
+   ------------------------------------------------------------------------- */
+
+function wireAdderPanel() {
+  const countEl = document.getElementById('add-operand-count');
+  const widthEl = document.getElementById('add-bit-width');
+  const rebuild = () => buildOperandInputs('add-operand-inputs', parseInt(countEl.value, 10), parseInt(widthEl.value, 10));
+  rebuild();
+  countEl.addEventListener('change', rebuild);
+  widthEl.addEventListener('change', rebuild);
+  document.getElementById('add-generate-btn').addEventListener('click', generateAdder);
+}
+
+function wireSubtractorPanel() {
+  const countEl = document.getElementById('sub-operand-count');
+  const widthEl = document.getElementById('sub-bit-width');
+  const rebuild = () => buildOperandInputs('sub-operand-inputs', parseInt(countEl.value, 10), parseInt(widthEl.value, 10));
+  rebuild();
+  countEl.addEventListener('change', rebuild);
+  widthEl.addEventListener('change', rebuild);
+  document.getElementById('sub-generate-btn').addEventListener('click', generateSubtractor);
+}
+
+function buildMultiplierOperandInputs(operandCount) {
+  const container = document.getElementById('mul-operand-inputs');
+  const names = ['A', 'B', 'C'].slice(0, operandCount);
+  container.innerHTML = names.map((nm, idx) => `
+    <div class="control-field operand-field">
+      <label for="mul-bit-width-${idx}">Operand ${nm} bit-width</label>
+      <select id="mul-bit-width-${idx}" class="select-input mul-width-select" data-operand-index="${idx}">
+        <option value="2">2-bit</option>
+        <option value="3" selected>3-bit</option>
+        <option value="4">4-bit</option>
+        <option value="5">5-bit</option>
+      </select>
+      <label for="mul-operand-inputs-op-${idx}" class="field-label-secondary">Value</label>
+      <input type="text" id="mul-operand-inputs-op-${idx}" class="text-input mono operand-input"
+             maxlength="6" inputmode="numeric" autocomplete="off" placeholder="e.g. 101" value="${idx === 0 ? '101' : (idx === 1 ? '011' : '10')}">
+    </div>`).join('');
+}
+
+function wireMultiplierPanel() {
+  const countEl = document.getElementById('mul-operand-count');
+  const rebuild = () => buildMultiplierOperandInputs(parseInt(countEl.value, 10));
+  rebuild();
+  countEl.addEventListener('change', rebuild);
+  document.getElementById('mul-generate-btn').addEventListener('click', generateMultiplier);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   let savedTheme = 'dark';
   try { savedTheme = localStorage.getItem('bool-circuit-theme') || 'dark'; } catch (e) { /* ignore */ }
@@ -940,4 +1855,17 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.textContent = next;
     }
   });
+
+  // ---- Tabs / views ----
+  document.querySelectorAll('.nav-tab').forEach(btn => {
+    btn.addEventListener('click', () => setActiveView(btn.dataset.view));
+  });
+  let savedView = 'boolean';
+  try { savedView = localStorage.getItem('bool-circuit-view') || 'boolean'; } catch (e) { /* ignore */ }
+  setActiveView(savedView);
+
+  // ---- Arithmetic modules ----
+  wireAdderPanel();
+  wireSubtractorPanel();
+  wireMultiplierPanel();
 });

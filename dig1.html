@@ -19,10 +19,12 @@
       <span class="logo-text">CIRCUIT</span>
     </a>
 
-    <!-- NAVBAR PLACEHOLDER — leaving this empty for now, will add nav items later -->
     <nav class="navbar" aria-label="Primary">
       <ul class="nav-list">
-        <!-- nav items go here later -->
+        <li><button type="button" class="nav-tab is-active" data-view="boolean" aria-current="page">Boolean Function</button></li>
+        <li><button type="button" class="nav-tab" data-view="adder" aria-current="false">Adder</button></li>
+        <li><button type="button" class="nav-tab" data-view="subtractor" aria-current="false">Subtractor</button></li>
+        <li><button type="button" class="nav-tab" data-view="multiplier" aria-current="false">Multiplier</button></li>
       </ul>
     </nav>
 
@@ -60,6 +62,8 @@
       <circle cx="990" cy="50" r="4" fill="currentColor"/>
     </svg>
   </section>
+
+  <div class="view" data-view="boolean" id="view-boolean">
 
   <!-- ============ CONTROL PANEL ============ -->
   <section class="panel-section" id="control-panel" aria-labelledby="control-heading">
@@ -345,6 +349,371 @@
 
     </div>
   </section>
+
+  </div><!-- /view-boolean -->
+
+  <!-- ============================================================
+       ADDER VIEW
+       ============================================================ -->
+  <div class="view is-hidden" data-view="adder" id="view-adder">
+
+    <section class="panel-section" id="add-control-panel" aria-labelledby="add-control-heading">
+      <div class="chip-card chip-card--wide">
+        <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+        <div class="chip-card-head">
+          <span class="chip-index">01</span>
+          <h2 id="add-control-heading">Set up the adder</h2>
+        </div>
+        <div class="control-grid">
+          <div class="control-field">
+            <label for="add-operand-count">Number of operands</label>
+            <select id="add-operand-count" class="select-input">
+              <option value="2" selected>2 operands (A + B)</option>
+              <option value="3">3 operands (A + B + C)</option>
+              <option value="4">4 operands (A + B + C + D)</option>
+            </select>
+          </div>
+          <div class="control-field">
+            <label for="add-bit-width">Bits per operand</label>
+            <select id="add-bit-width" class="select-input">
+              <option value="2">2-bit</option>
+              <option value="3" selected>3-bit</option>
+              <option value="4">4-bit</option>
+              <option value="6">6-bit</option>
+              <option value="8">8-bit</option>
+            </select>
+          </div>
+        </div>
+        <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <section class="panel-section" id="add-input-section" aria-labelledby="add-input-heading">
+      <div class="section-heading-row">
+        <span class="chip-index">02</span>
+        <h2 id="add-input-heading" class="visually-hidden">Enter operand values</h2>
+      </div>
+      <div class="chip-card chip-card--wide">
+        <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+        <div class="chip-card-head">
+          <h3>Operand values</h3>
+          <span class="tag">Binary, MSB first</span>
+        </div>
+        <div class="control-grid" id="add-operand-inputs"></div>
+        <div class="generate-action">
+          <button id="add-generate-btn" class="btn btn-primary" type="button">Generate adder circuit</button>
+          <p class="field-hint">Builds the ripple-carry chain &amp; verifies the result.</p>
+        </div>
+        <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <section class="panel-section" id="add-results" aria-labelledby="add-results-heading">
+      <div class="section-heading-row">
+        <span class="chip-index">03</span>
+        <h2 id="add-results-heading">Results</h2>
+      </div>
+      <div class="results-grid">
+        <div class="chip-card chip-card--wide" id="add-result-summary">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Inputs &amp; result</h3></div>
+          <div class="result-body"><p class="placeholder-text">Enter operands and generate to see the sum.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="add-result-expr">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Sum / Carry expressions</h3><span class="tag">Adder cell</span></div>
+          <div class="result-body"><p class="placeholder-text">Boolean expressions for the underlying Half/Full Adder will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="add-result-truth">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Adder cell truth table</h3></div>
+          <div class="result-body"><p class="placeholder-text">The Half/Full Adder truth table will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="add-result-basic">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Logic gate implementation</h3><span class="tag">AND · OR · XOR · NOT</span></div>
+          <div class="result-body diagram-body"><p class="placeholder-text">Basic-gate circuit for the adder cell will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="add-result-nand">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>NAND-only circuit</h3><span class="tag">Universal gate</span></div>
+          <div class="result-body diagram-body"><p class="placeholder-text">NAND-only circuit for the adder cell will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="add-result-nor">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>NOR-only circuit</h3><span class="tag">Universal gate</span></div>
+          <div class="result-body diagram-body"><p class="placeholder-text">NOR-only circuit for the adder cell will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="add-result-chain">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Ripple-carry chain</h3><span class="tag">Full multi-bit / multi-operand circuit</span></div>
+          <div class="result-body"><p class="placeholder-text">The full HA/FA chain, with actual signal values, will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card" id="add-result-verify">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Verification</h3></div>
+          <div class="result-body"><p class="placeholder-text">Run "Generate adder circuit" to verify correctness.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+      </div>
+    </section>
+
+  </div><!-- /view-adder -->
+
+  <!-- ============================================================
+       SUBTRACTOR VIEW
+       ============================================================ -->
+  <div class="view is-hidden" data-view="subtractor" id="view-subtractor">
+
+    <section class="panel-section" id="sub-control-panel" aria-labelledby="sub-control-heading">
+      <div class="chip-card chip-card--wide">
+        <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+        <div class="chip-card-head">
+          <span class="chip-index">01</span>
+          <h2 id="sub-control-heading">Set up the subtractor</h2>
+        </div>
+        <div class="control-grid">
+          <div class="control-field">
+            <label for="sub-operand-count">Number of operands</label>
+            <select id="sub-operand-count" class="select-input">
+              <option value="2" selected>2 operands (A − B)</option>
+              <option value="3">3 operands (A − B − C)</option>
+              <option value="4">4 operands (A − B − C − D)</option>
+            </select>
+          </div>
+          <div class="control-field">
+            <label for="sub-bit-width">Bits per operand</label>
+            <select id="sub-bit-width" class="select-input">
+              <option value="2">2-bit</option>
+              <option value="3" selected>3-bit</option>
+              <option value="4">4-bit</option>
+              <option value="6">6-bit</option>
+              <option value="8">8-bit</option>
+            </select>
+          </div>
+        </div>
+        <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <section class="panel-section" id="sub-input-section" aria-labelledby="sub-input-heading">
+      <div class="section-heading-row">
+        <span class="chip-index">02</span>
+        <h2 id="sub-input-heading" class="visually-hidden">Enter operand values</h2>
+      </div>
+      <div class="chip-card chip-card--wide">
+        <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+        <div class="chip-card-head">
+          <h3>Operand values</h3>
+          <span class="tag">Binary, MSB first</span>
+        </div>
+        <div class="control-grid" id="sub-operand-inputs"></div>
+        <div class="generate-action">
+          <button id="sub-generate-btn" class="btn btn-primary" type="button">Generate subtractor circuit</button>
+          <p class="field-hint">Builds the ripple-borrow chain &amp; verifies the result.</p>
+        </div>
+        <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <section class="panel-section" id="sub-results" aria-labelledby="sub-results-heading">
+      <div class="section-heading-row">
+        <span class="chip-index">03</span>
+        <h2 id="sub-results-heading">Results</h2>
+      </div>
+      <div class="results-grid">
+        <div class="chip-card chip-card--wide" id="sub-result-summary">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Inputs &amp; result</h3></div>
+          <div class="result-body"><p class="placeholder-text">Enter operands and generate to see the difference.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="sub-result-expr">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Diff / Borrow expressions</h3><span class="tag">Subtractor cell</span></div>
+          <div class="result-body"><p class="placeholder-text">Boolean expressions for the underlying Half/Full Subtractor will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="sub-result-truth">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Subtractor cell truth table</h3></div>
+          <div class="result-body"><p class="placeholder-text">The Half/Full Subtractor truth table will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="sub-result-basic">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Logic gate implementation</h3><span class="tag">AND · OR · XOR · NOT</span></div>
+          <div class="result-body diagram-body"><p class="placeholder-text">Basic-gate circuit for the subtractor cell will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="sub-result-nand">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>NAND-only circuit</h3><span class="tag">Universal gate</span></div>
+          <div class="result-body diagram-body"><p class="placeholder-text">NAND-only circuit for the subtractor cell will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="sub-result-nor">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>NOR-only circuit</h3><span class="tag">Universal gate</span></div>
+          <div class="result-body diagram-body"><p class="placeholder-text">NOR-only circuit for the subtractor cell will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="sub-result-chain">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Ripple-borrow chain</h3><span class="tag">Full multi-bit / multi-operand circuit</span></div>
+          <div class="result-body"><p class="placeholder-text">The full HS/FS chain, with actual signal values, will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card" id="sub-result-verify">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Verification</h3></div>
+          <div class="result-body"><p class="placeholder-text">Run "Generate subtractor circuit" to verify correctness.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+      </div>
+    </section>
+
+  </div><!-- /view-subtractor -->
+
+  <!-- ============================================================
+       MULTIPLIER VIEW
+       ============================================================ -->
+  <div class="view is-hidden" data-view="multiplier" id="view-multiplier">
+
+    <section class="panel-section" id="mul-control-panel" aria-labelledby="mul-control-heading">
+      <div class="chip-card chip-card--wide">
+        <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+        <div class="chip-card-head">
+          <span class="chip-index">01</span>
+          <h2 id="mul-control-heading">Set up the multiplier</h2>
+        </div>
+        <div class="control-grid">
+          <div class="control-field">
+            <label for="mul-operand-count">Number of operands</label>
+            <select id="mul-operand-count" class="select-input">
+              <option value="2" selected>2 operands (A × B)</option>
+              <option value="3">3 operands (A × B × C)</option>
+            </select>
+            <p class="field-hint">Each operand has its own bit-width below.</p>
+          </div>
+        </div>
+        <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <section class="panel-section" id="mul-input-section" aria-labelledby="mul-input-heading">
+      <div class="section-heading-row">
+        <span class="chip-index">02</span>
+        <h2 id="mul-input-heading" class="visually-hidden">Enter operand values</h2>
+      </div>
+      <div class="chip-card chip-card--wide">
+        <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+        <div class="chip-card-head">
+          <h3>Operand values</h3>
+          <span class="tag">Binary, MSB first</span>
+        </div>
+        <div class="control-grid" id="mul-operand-inputs"></div>
+        <div class="generate-action">
+          <button id="mul-generate-btn" class="btn btn-primary" type="button">Generate multiplier circuit</button>
+          <p class="field-hint">Builds the partial-product / adder tree &amp; verifies the result.</p>
+        </div>
+        <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <section class="panel-section" id="mul-results" aria-labelledby="mul-results-heading">
+      <div class="section-heading-row">
+        <span class="chip-index">03</span>
+        <h2 id="mul-results-heading">Results</h2>
+      </div>
+      <div class="results-grid">
+        <div class="chip-card chip-card--wide" id="mul-result-summary">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Inputs &amp; result</h3></div>
+          <div class="result-body"><p class="placeholder-text">Enter operands and generate to see the product.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="mul-result-partials">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Partial products</h3><span class="tag">Shift &amp; add</span></div>
+          <div class="result-body"><p class="placeholder-text">The AND-gate partial-product rows for the first two operands will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="mul-result-expr">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Partial-product expression</h3><span class="tag">AND cell</span></div>
+          <div class="result-body"><p class="placeholder-text">The Boolean expression for a single partial-product bit will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="mul-result-truth">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>AND-cell truth table</h3></div>
+          <div class="result-body"><p class="placeholder-text">The partial-product AND cell's truth table will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="mul-result-basic">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Logic gate implementation</h3><span class="tag">AND</span></div>
+          <div class="result-body diagram-body"><p class="placeholder-text">Basic-gate circuit for the partial-product cell will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="mul-result-nand">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>NAND-only circuit</h3><span class="tag">Universal gate</span></div>
+          <div class="result-body diagram-body"><p class="placeholder-text">NAND-only circuit for the partial-product cell will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="mul-result-nor">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>NOR-only circuit</h3><span class="tag">Universal gate</span></div>
+          <div class="result-body diagram-body"><p class="placeholder-text">NOR-only circuit for the partial-product cell will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card chip-card--wide" id="mul-result-chain">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Adder tree (summing partial products)</h3><span class="tag">Full circuit</span></div>
+          <div class="result-body"><p class="placeholder-text">The ripple-carry chain(s) used to sum the partial products will appear here.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+
+        <div class="chip-card" id="mul-result-verify">
+          <div class="chip-pins chip-pins--top" aria-hidden="true"></div>
+          <div class="chip-card-head"><h3>Verification</h3></div>
+          <div class="result-body"><p class="placeholder-text">Run "Generate multiplier circuit" to verify correctness.</p></div>
+          <div class="chip-pins chip-pins--bottom" aria-hidden="true"></div>
+        </div>
+      </div>
+    </section>
+
+  </div><!-- /view-multiplier -->
 
 </main>
 
