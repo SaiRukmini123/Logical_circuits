@@ -1,43 +1,35 @@
-
 # BOOL( ) CIRCUIT
 
-**Feed it a function. Get back the whole circuit.** 
+Feed it a function, get back the circuit.
 
-BOOL( ) CIRCUIT is an interactive, web-based educational tool designed to evaluate, simplify, and visualize digital logic circuits. Whether you are working with raw Boolean expressions, truth tables, minterms, or maxterms, this application automatically simplifies the logic and generates the corresponding gate level circuit diagrams. 
+BOOL( ) CIRCUIT is a web tool for digital logic circuits. Give it a Boolean expression, truth table, minterms, or maxterms, and it simplifies the logic before generating the complete gate-level circuit diagrams.
 
-Built for the **(EE1202) Digital Circuits** course at the **Indian Institute of Technology Hyderabad (IITH)**.
-
----
+Built for the EE1202 Digital Circuits course at IIT Hyderabad.
 
 ## Features
 
-* **Multiple Input Methods:** Enter logic via Boolean expressions, truth tables, minterms (Σm), or maxterms (ΠM).
-* **Advanced Simplification:** Implements the Quine McCluskey algorithm and Petrick's method for exact minimum cover simplification.
-* **Universal Gate Conversion:** Automatically converts and renders your basic logic circuit into **NAND only** and **NOR only** universal gate implementations.
-* **Arithmetic Circuits Module:**
-  * **Adders:** Configurable Half Adders, Full Adders, and multi bit Ripple Carry chains.
-  * **Subtractors:** Configurable Half/Full Subtractors and Ripple-Borrow chains.
-  * **Multipliers:** Visualizes partial products (shift & add) and the resulting adder tree.
-* **Live SVG Rendering:** Gate networks are built using a custom Directed Acyclic Graph (DAG) layout engine to draw clean, readable SVG diagrams dynamically.
-* **Theme Support:** Fully responsive UI with a built in Light/Dark mode toggle.
+- **Multiple Input Types:** Supports Boolean expressions, truth tables, minterms (Σm), and maxterms (ΠM).
+- **Logic Simplification:** Uses the Quine-McCluskey algorithm and Petrick's method to get the minimum logic representation.
+- **Universal Gates:** Automatically converts basic logic into NAND-only and NOR-only circuits.
+- **Arithmetic Modules:**
+  * **Adders:** Half Adders, Full Adders, and multi-bit Ripple-Carry chains.
+  * **Subtractors:** Half/Full Subtractors and Ripple-Borrow chains.
+  * **Multipliers:** Shows partial products (shift and add) alongside the adder tree.
+- **SVG Diagrams:** Dynamically draws readable circuit diagrams right in the browser.
+- **Theme Support:** Includes a toggle for Light and Dark mode.
 
-## Technologies Used
+## Tech Stack
 
-This project is built entirely with vanilla web technologies. No external UI libraries or dependencies were used.
+Built with plain web technologies, no external frameworks or npm dependencies required.
 
-* **HTML5:** Semantic structure and accessible forms.
-* **CSS3:** Custom CSS variables for theming, CSS Grid/Flexbox for layout, and fully responsive design.
-* **JavaScript (ES6+):** Vanilla JS handles the expression tokenization/parsing, Quine McCluskey logic reduction, DAG layout calculations, and dynamic SVG generation.
+- **HTML5:** Form controls and document layout.
+- **CSS3:** Custom themes with CSS variables, Grid, and Flexbox layouts.
+- **JavaScript (ES6+):** Handles expression parsing, logic reduction, SVG diagram generation, and arithmetic simulation.
 
-## Getting Started
+## How to Run
 
-Since this is a static frontend application, no build tools or servers are required.
+Since this is a static frontend project, you don't need to install any packages or build tools.
 
-### Option 1: Live Demo
-You can view the live deployment of this project here: 
-> **[Live Demo on Netlify](https://spectacular-kitsune-be025e.netlify.app)**
-
-### Option 2: Run Locally
-1. Clone the repository to your local machine:
+1. Clone the repository to your computer:
    ```bash
    git clone [https://github.com/SaiRukmini123/Logical_circuits.git](https://github.com/SaiRukmini123/Logical_circuits.git)
