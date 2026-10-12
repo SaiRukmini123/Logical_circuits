@@ -2,18 +2,18 @@
 
 Feed it a function, get back the circuit.
 
-BOOL( ) CIRCUIT is a web tool for digital logic circuits. Give it a Boolean expression, truth table, minterms, or maxterms, and it simplifies the logic before generating the complete gate-level circuit diagrams.
+BOOL( ) CIRCUIT is a web tool for digital logic circuits. Give it a Boolean expression, truth table, minterms, or maxterms, and it simplifies the logic before generating the complete gate level circuit diagrams.
 
 Built for the EE1202 Digital Circuits course at IIT Hyderabad.
 
 ## Features
 
 - **Multiple Input Types:** Supports Boolean expressions, truth tables, minterms (Σm), and maxterms (ΠM).
-- **Logic Simplification:** Uses the Quine-McCluskey algorithm and Petrick's method to get the minimum logic representation.
-- **Universal Gates:** Automatically converts basic logic into NAND-only and NOR-only circuits.
+- **Logic Simplification:** Uses the Quine McCluskey algorithm and Petrick's method to get the minimum logic representation.
+- **Universal Gates:** Automatically converts basic logic into NAND only and NOR only circuits.
 - **Arithmetic Modules:**
-  * **Adders:** Half Adders, Full Adders, and multi-bit Ripple-Carry chains.
-  * **Subtractors:** Half/Full Subtractors and Ripple-Borrow chains.
+  * **Adders:** Half Adders, Full Adders, and multi bit Ripple Carry chains.
+  * **Subtractors:** Half/Full Subtractors and Ripple Borrow chains.
   * **Multipliers:** Shows partial products (shift and add) alongside the adder tree.
 - **SVG Diagrams:** Dynamically draws readable circuit diagrams right in the browser.
 - **Theme Support:** Includes a toggle for Light and Dark mode.
